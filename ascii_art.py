@@ -4,20 +4,20 @@ Contains banner and visual elements
 """
 
 # Main Banner - Compact version
-BANNER = """[bold cyan]
+BANNER = """
 ██╗      ██████╗  ██████╗ █████╗ ██╗
 ██║     ██╔═══██╗██╔════╝██╔══██╗██║
 ██║     ██║   ██║██║     ███████║██║
 ███████╗╚██████╔╝╚██████╗██║  ██║███████╗
 ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝
-[/bold cyan][bold magenta]
+
 █████╗  ██████╗ ███████╗███╗   ██╗████████╗
 ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝
 ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║
 ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║
 ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║
 ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
-[/bold magenta]"""
+"""
 
 # Subtitle
-SUBTITLE = "[bold green]> Open Source Terminal AI Agent <[/bold green]"
+SUBTITLE = "> Open Source Terminal AI Agent <"
