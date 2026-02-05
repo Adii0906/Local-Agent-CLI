@@ -553,31 +553,75 @@ class LocalAgent:
             # Just chat normally without trying to create files
             return self.chat_with_model(model_name, user_message)
         
-        enhanced_prompt = f"""You are a code generation assistant. Create files based on the user's request.
+        enhanced_prompt = f"""You are a terminal code generation agent that creates complete projects from natural language descriptions.
 
 User request: {user_message}
 
-IMPORTANT: You MUST respond in this exact format:
+CRITICAL: Respond ONLY in this EXACT format. No explanations, no extra text.
 
-FOLDER: folder_name
-FILE: filename.ext
-```
-[complete file content here]
-```
+FOLDER: [project-folder]
+FILE: [folder]/filename.ext
+```language
+[complete working file content]
+RULES:
 
-Example response format:
-FOLDER: src
-FILE: src/app.py
-```python
-print("Hello World")
-```
+Infer tech stack from request (Flask→.py+requirements.txt, React→.jsx+package.json, HTML→.html/.css/.js, Django→manage.py+settings.py, etc.)
 
-FILE: README.md
-```markdown
-# My Project
-```
+Create realistic multi-file projects with proper folder structure
 
-Now create the files for the user's request."""
+Use correct syntax highlighting (python, html, css, javascript, ```json, etc.)
+
+Make files RUNNABLE immediately
+
+Include requirements.txt/package.json/README.md when needed
+
+EXAMPLES:
+
+HTML/CSS/JS site:
+FOLDER: website
+FILE: website/index.html
+
+xml
+<!DOCTYPE html>
+<html>
+<head><title>My Site</title></head>
+<body><h1>Hello World</h1></body>
+</html>
+FILE: website/style.css
+
+css
+h1 {{ color: blue; }}
+Flask API:
+FOLDER: api
+FILE: api/app.py
+
+python
+from flask import Flask
+app = Flask(__name__)
+
+@app.route('/')
+def hello(): return 'Hello World!'
+
+if __name__ == '__main__':
+    app.run(debug=True)
+FILE: api/requirements.txt
+
+text
+Flask==3.0.0
+React app:
+FOLDER: react-app
+FILE: react-app/src/App.jsx
+
+jsx
+function App() {{
+  return <h1>Hello React!</h1>;
+}}
+export default App;
+FILE: react-app/package.json
+
+json
+{{"name": "react-app", "dependencies": {{"react": "^18.0.0"}}}}
+Now create the complete project for: {user_message}"""
         
         try:
             process = subprocess.Popen(
