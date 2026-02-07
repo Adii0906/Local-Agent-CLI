@@ -342,9 +342,32 @@ class LocalAgent:
     def display_animated_intro(self):
         """Show animated intro"""
         self.console.clear()
-        self.console.print(f"\n[bold cyan]{BANNER}[/bold cyan]")
-        self.console.print(f"[dim]{SUBTITLE}[/dim]\n")
-        time.sleep(0.3)
+        for line in BANNER.splitlines():
+            self.console.print(f"[bold cyan]{line}[/bold cyan]")
+            time.sleep(0.05)  # animation speed
+        time.sleep(0.2)
+        self.console.print(f"\n[dim]{SUBTITLE}[/dim]\n")
+
+         # ⚠️ Global disclaimer (TOP of intro)
+        intro_note = (
+        "[bold yellow]IMPORTANT NOTE:[/bold yellow]\n"
+        "• Build mode may be slow depending on your system.\n"
+        "• Local Ollama models can make mistakes or be outdated.\n"
+        "• Sometimes random or incorrect files may be created.\n"
+        "• Always cross-verify generated code and files.\n"
+        "• Use the latest model for better accuracy.\n\n"
+        "[green]Chat mode works fine for general queries.[/green]"
+    )
+        self.console.print(
+            Panel(
+                intro_note,
+                title="[bold yellow]Before You Start[/bold yellow]",
+                border_style="yellow"
+            )
+        )
+
+    time.sleep(0.5)
+
     
     def check_prerequisites(self) -> bool:
         """Check if Ollama is installed and running"""
