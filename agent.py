@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LocalAgent SDK - Open Source Terminal AI Agent
-Enhanced with Model Management & Code Analysis
+Enhanced with Smart Build System & Model Management
 """
 
 import sys
@@ -13,6 +13,11 @@ import subprocess
 import re
 import os
 
+# Fix encoding for Windows
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
 try:
     from rich.console import Console
     from rich.panel import Panel
@@ -22,17 +27,50 @@ try:
     from rich.text import Text
     from rich.syntax import Syntax
     from rich.tree import Tree
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
     from rich.markdown import Markdown
-    from rich.layout import Layout
     from rich.live import Live
 except ImportError:
     print("Error: 'rich' library not found!")
     print("\nInstall: pip install rich")
     sys.exit(1)
 
-from ascii_art import BANNER, SUBTITLE
-from models import FREE_MODELS
+# Import banner if available, otherwise use default
+try:
+    from ascii_art import BANNER, SUBTITLE
+except ImportError:
+    BANNER = "LocalAgent"
+    SUBTITLE = "AI-Powered Code Generation"
+
+# Default models if models.py is not available
+DEFAULT_MODELS = [
+    {
+        "name": "qwen2.5-coder:3b",
+        "size": "3B",
+        "description": "Fast, good for simple projects"
+    },
+    {
+        "name": "qwen2.5-coder:7b",
+        "size": "7B",
+        "description": "Balanced speed and quality"
+    },
+    {
+        "name": "deepseek-coder-v2:16b",
+        "size": "16B",
+        "description": "Best quality for complex projects"
+    },
+    {
+        "name": "codellama:7b",
+        "size": "7B",
+        "description": "Meta's CodeLlama model"
+    }
+]
+
+# Try to import FREE_MODELS, use default if not available
+try:
+    from models import FREE_MODELS
+except ImportError:
+    FREE_MODELS = DEFAULT_MODELS
 
 console = Console()
 
@@ -97,8 +135,8 @@ class SafeFileSystem:
         return False
     
     def get_preview_tree(self) -> Tree:
-        """Generate preview tree"""
-        tree = Tree("[bold cyan]📁 Project Structure[/bold cyan]", guide_style="cyan")
+        """Generate preview tree with animation"""
+        tree = Tree("[bold cyan]Project Structure[/bold cyan]", guide_style="cyan")
         
         folders = sorted([op for op in self.pending_operations if op.is_dir], key=lambda x: str(x.path))
         files = sorted([op for op in self.pending_operations if not op.is_dir], key=lambda x: str(x.path))
@@ -114,7 +152,7 @@ class SafeFileSystem:
                 key = '/'.join(parts[:i+1])
                 if key not in path_nodes:
                     status = "[yellow](exists)[/yellow]" if op.exists else "[green](new)[/green]"
-                    node = current.add(f"📁 [cyan]{part}[/cyan] {status}")
+                    node = current.add(f"[DIR] [cyan]{part}[/cyan] {status}")
                     path_nodes[key] = node
                 current = path_nodes[key]
         
@@ -130,46 +168,60 @@ class SafeFileSystem:
             
             status = "[red](overwrite)[/red]" if op.exists else "[green](new)[/green]"
             size = f" ({len(op.content)} bytes)" if op.content else ""
-            current.add(f"📄 [white]{parts[-1]}[/white]{size} {status}")
+            current.add(f"[FILE] [white]{parts[-1]}[/white]{size} {status}")
         
         return tree
     
     def execute_operations(self, console: Console) -> bool:
-        """Execute operations with progress"""
+        """Execute operations with animated progress"""
         if not self.pending_operations:
             return True
         
         overwrites = [op for op in self.pending_operations if op.exists and not op.is_dir]
         
         if overwrites:
-            console.print("\n[bold yellow]⚠️  Files exist:[/bold yellow]")
+            console.print("\n[bold yellow]WARNING: Files exist:[/bold yellow]")
             for op in overwrites:
                 rel = op.path.relative_to(self.workspace)
-                console.print(f"  • {rel}")
+                console.print(f"  - {rel}")
             console.print()
-            if not Confirm.ask("[yellow]Overwrite?[/yellow]", default=False):
-                console.print("[red]✗ Cancelled[/red]\n")
+            if not Confirm.ask("[yellow]Overwrite existing files?[/yellow]", default=False):
+                console.print("[red]Operation cancelled[/red]\n")
                 return False
         
         try:
-            # Show what we're creating
-            console.print("\n[cyan]Creating files...[/cyan]\n")
+            # Animated file creation
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                console=console
+            ) as progress:
+                
+                task = progress.add_task("[cyan]Creating files...", total=len(self.pending_operations))
+                
+                for op in self.pending_operations:
+                    if op.is_dir:
+                        op.path.mkdir(parents=True, exist_ok=True)
+                        progress.update(task, advance=1, description=f"[green]OK[/green] Created folder: [cyan]{op.path.name}[/cyan]")
+                    else:
+                        op.path.parent.mkdir(parents=True, exist_ok=True)
+                        # Fix encoding issue - use utf-8 with error handling
+                        try:
+                            with open(op.path, 'w', encoding='utf-8', errors='replace') as f:
+                                f.write(op.content)
+                        except Exception as e:
+                            console.print(f"[red]Error writing {op.path.name}: {e}[/red]")
+                            continue
+                        progress.update(task, advance=1, description=f"[green]OK[/green] Created file: [cyan]{op.path.name}[/cyan]")
+                    time.sleep(0.05)
             
-            for op in self.pending_operations:
-                if op.is_dir:
-                    op.path.mkdir(parents=True, exist_ok=True)
-                    console.print(f"[green]✓[/green] Created folder: [cyan]{op.path.name}[/cyan]")
-                else:
-                    op.path.parent.mkdir(parents=True, exist_ok=True)
-                    op.path.write_text(op.content, encoding='utf-8')
-                    console.print(f"[green]✓[/green] Wrote file: [cyan]{op.path.name}[/cyan] ({len(op.content)} bytes)")
-                time.sleep(0.1)
-            
-            console.print(f"\n[bold green]✓ Success! Created {len(self.pending_operations)} items[/bold green]\n")
+            console.print(f"\n[bold green]SUCCESS: Created {len(self.pending_operations)} items[/bold green]\n")
             return True
             
         except Exception as e:
-            console.print(f"\n[bold red]✗ Error: {str(e)}[/bold red]\n")
+            console.print(f"\n[bold red]ERROR: {str(e)}[/bold red]\n")
             return False
         finally:
             self.pending_operations.clear()
@@ -195,654 +247,506 @@ class CodeAnalyzer:
             "files": [],
             "directories": [],
             "languages": {},
-            "total_lines": 0,
             "total_size": 0,
-            "file_types": {}
+            "file_count": 0
         }
         
-        exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build', '.next'}
+        ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build'}
         
-        for item in target_path.rglob('*'):
-            # Skip excluded directories
-            if any(excluded in item.parts for excluded in exclude_dirs):
-                continue
-            
-            if item.is_file():
-                try:
-                    size = item.stat().st_size
-                    analysis["total_size"] += size
-                    
-                    ext = item.suffix.lower()
-                    analysis["file_types"][ext] = analysis["file_types"].get(ext, 0) + 1
-                    
-                    # Count lines for text files
-                    if ext in ['.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.go', '.rs', '.rb', '.php', '.html', '.css', '.md', '.txt']:
-                        try:
-                            with open(item, 'r', encoding='utf-8', errors='ignore') as f:
-                                lines = sum(1 for _ in f)
-                                analysis["total_lines"] += lines
-                                
-                            # Language detection
-                            lang = self._detect_language(ext)
-                            if lang:
-                                if lang not in analysis["languages"]:
-                                    analysis["languages"][lang] = {"files": 0, "lines": 0}
-                                analysis["languages"][lang]["files"] += 1
-                                analysis["languages"][lang]["lines"] += lines
-                        except:
-                            pass
-                    
-                    analysis["files"].append({
-                        "path": str(item.relative_to(self.workspace)),
-                        "size": size,
-                        "ext": ext
-                    })
-                except:
+        try:
+            for item in target_path.rglob('*'):
+                # Skip ignored directories
+                if any(ignored in item.parts for ignored in ignore_dirs):
                     continue
-            elif item.is_dir():
-                analysis["directories"].append(str(item.relative_to(self.workspace)))
+                
+                if item.is_file():
+                    try:
+                        size = item.stat().st_size
+                        analysis["files"].append(str(item.relative_to(self.workspace)))
+                        analysis["total_size"] += size
+                        analysis["file_count"] += 1
+                        
+                        # Count by extension
+                        ext = item.suffix.lower()
+                        if ext:
+                            analysis["languages"][ext] = analysis["languages"].get(ext, 0) + 1
+                    except:
+                        pass
+                elif item.is_dir():
+                    analysis["directories"].append(str(item.relative_to(self.workspace)))
+        except Exception as e:
+            self.console.print(f"[red]Analysis error: {e}[/red]")
         
         return analysis
     
-    def _detect_language(self, ext: str) -> Optional[str]:
-        """Detect programming language from extension"""
-        lang_map = {
-            '.py': 'Python',
-            '.js': 'JavaScript',
-            '.jsx': 'React/JSX',
-            '.ts': 'TypeScript',
-            '.tsx': 'TypeScript/React',
-            '.java': 'Java',
-            '.cpp': 'C++',
-            '.c': 'C',
-            '.go': 'Go',
-            '.rs': 'Rust',
-            '.rb': 'Ruby',
-            '.php': 'PHP',
-            '.html': 'HTML',
-            '.css': 'CSS',
-            '.md': 'Markdown'
-        }
-        return lang_map.get(ext)
-    
     def display_analysis(self, analysis: Dict):
-        """Display analysis with rich formatting"""
-        # Summary Panel
-        total_files = len(analysis["files"])
-        total_dirs = len(analysis["directories"])
-        total_size_mb = analysis["total_size"] / (1024 * 1024)
+        """Display analysis results"""
+        panel_content = f"""[cyan]Files:[/cyan] {analysis['file_count']}
+[cyan]Size:[/cyan] {analysis['total_size'] / 1024:.1f} KB
+[cyan]Directories:[/cyan] {len(analysis['directories'])}"""
         
-        summary = Panel(
-            f"[cyan]Files:[/cyan] {total_files}\n"
-            f"[cyan]Directories:[/cyan] {total_dirs}\n"
-            f"[cyan]Total Lines:[/cyan] {analysis['total_lines']:,}\n"
-            f"[cyan]Total Size:[/cyan] {total_size_mb:.2f} MB",
-            title="[bold cyan]📊 Codebase Summary[/bold cyan]",
-            border_style="cyan",
-            box=box.ROUNDED
-        )
-        self.console.print(summary)
-        self.console.print()
+        self.console.print(Panel(panel_content, title="[bold]Codebase Summary[/bold]", border_style="cyan"))
         
-        # Languages Table
         if analysis["languages"]:
-            self.console.print("[bold cyan]📝 Languages:[/bold cyan]\n")
-            table = Table(box=box.ROUNDED, border_style="cyan")
-            table.add_column("Language", style="green")
-            table.add_column("Files", style="yellow", justify="right")
-            table.add_column("Lines", style="magenta", justify="right")
+            self.console.print("\n[bold]Languages:[/bold]")
+            table = Table(box=box.SIMPLE)
+            table.add_column("Extension", style="cyan")
+            table.add_column("Files", justify="right", style="green")
             
-            sorted_langs = sorted(analysis["languages"].items(), key=lambda x: x[1]["lines"], reverse=True)
-            for lang, stats in sorted_langs:
-                table.add_row(lang, str(stats["files"]), f"{stats['lines']:,}")
+            for ext, count in sorted(analysis["languages"].items(), key=lambda x: -x[1]):
+                table.add_row(ext, str(count))
             
             self.console.print(table)
-            self.console.print()
         
-        # File Types
-        if analysis["file_types"]:
-            self.console.print("[bold cyan]📁 File Types:[/bold cyan]\n")
-            table = Table(box=box.ROUNDED, border_style="cyan")
-            table.add_column("Extension", style="green")
-            table.add_column("Count", style="yellow", justify="right")
-            
-            sorted_types = sorted(analysis["file_types"].items(), key=lambda x: x[1], reverse=True)[:10]
-            for ext, count in sorted_types:
-                table.add_row(ext if ext else "(no ext)", str(count))
-            
-            self.console.print(table)
-            self.console.print()
+        self.console.print()
     
-    def search_code(self, pattern: str, file_pattern: str = "*") -> List[Dict]:
-        """Search for pattern in codebase"""
+    def search_code(self, pattern: str) -> List[Dict]:
+        """Search for pattern in code"""
         results = []
-        exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build'}
+        ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv'}
         
-        for file_path in self.workspace.rglob(file_pattern):
-            if any(excluded in file_path.parts for excluded in exclude_dirs):
-                continue
-            
-            if file_path.is_file():
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line_num, line in enumerate(f, 1):
+        try:
+            for file_path in self.workspace.rglob('*'):
+                if any(ignored in file_path.parts for ignored in ignore_dirs):
+                    continue
+                
+                if file_path.is_file():
+                    try:
+                        content = file_path.read_text(encoding='utf-8', errors='ignore')
+                        for i, line in enumerate(content.split('\n'), 1):
                             if pattern.lower() in line.lower():
                                 results.append({
                                     "file": str(file_path.relative_to(self.workspace)),
-                                    "line": line_num,
+                                    "line": i,
                                     "content": line.strip()
                                 })
-                except:
-                    continue
+                    except:
+                        pass
+        except Exception as e:
+            self.console.print(f"[red]Search error: {e}[/red]")
         
         return results
 
 
 class LocalAgent:
+    """Main agent class"""
+    
     def __init__(self):
         self.console = console
         self.current_model = None
         self.conversation_history = []
         self.filesystem = SafeFileSystem(WORKSPACE_DIR)
         self.analyzer = CodeAnalyzer(WORKSPACE_DIR)
-        self.mode = "chat"  # chat, build, or analyze
-    
-    def show_thinking_animation(self, message: str = "Thinking"):
-        """Show animated thinking spinner"""
-        return Progress(
-            SpinnerColumn(),
-            TextColumn("[cyan]{task.description}[/cyan]"),
-            console=self.console,
-            transient=True
-        )
-    
-    def show_help(self, mode: str):
-        """Show help for current mode"""
-        if mode == "chat":
-            help_text = """[bold cyan]CHAT MODE - Help[/bold cyan]
-
-[yellow]What you can do:[/yellow]
-• Ask questions and get AI responses
-• Get code explanations
-• Debug help
-• General conversation
-
-[yellow]Commands:[/yellow]
-• [cyan]/build[/cyan] - Switch to build mode
-• [cyan]/analyze[/cyan] - Switch to analyze mode
-• [cyan]/help[/cyan] - Show this help
-• [cyan]/exit[/cyan] - Quit application
-
-[yellow]Examples:[/yellow]
-• Explain how decorators work in Python
-• What's the difference between let and const?
-• Help me debug this error: [paste error]
-"""
-        elif mode == "build":
-            help_text = """[bold magenta]BUILD MODE - Help[/bold magenta]
-
-[yellow]What you can do:[/yellow]
-• Create files and folders
-• Generate complete projects
-• Build components and scripts
-• Setup project structures
-
-[yellow]Commands:[/yellow]
-• [cyan]/chat[/cyan] - Switch to chat mode
-• [cyan]/analyze[/cyan] - Switch to analyze mode
-• [cyan]/help[/cyan] - Show this help
-• [cyan]/exit[/cyan] - Quit application
-
-[yellow]Examples:[/yellow]
-• Create a Flask REST API with authentication
-• Build a React todo component
-• Make a Python script to scrape news
-• Setup a Node.js Express server
-
-[yellow]Tips:[/yellow]
-• Be specific about what files you want
-• Use words like 'create', 'build', 'make'
-• If just chatting, it won't create files
-"""
-        else:  # analyze
-            help_text = """[bold yellow]ANALYZE MODE - Help[/bold yellow]
-
-[yellow]What you can do:[/yellow]
-• Analyze your entire codebase
-• Get statistics and metrics
-• Search for code patterns
-• Find specific functions or classes
-
-[yellow]Commands:[/yellow]
-• [cyan]analyze[/cyan] - Analyze entire codebase
-• [cyan]analyze <path>[/cyan] - Analyze specific folder
-• [cyan]search <pattern>[/cyan] - Search in code
-• [cyan]/chat[/cyan] - Switch to chat mode
-• [cyan]/build[/cyan] - Switch to build mode
-• [cyan]/help[/cyan] - Show this help
-• [cyan]/exit[/cyan] - Quit application
-
-[yellow]Examples:[/yellow]
-• analyze
-• analyze src
-• search TODO
-• search function login
-"""
+        self.mode = "build"  # Default to build mode
         
-        self.console.print(Panel(help_text, border_style="cyan", padding=(1, 2)))
-        self.console.print()
+    def display_animated_intro(self):
+        """Show animated intro"""
+        self.console.clear()
+        self.console.print(f"\n[bold cyan]{BANNER}[/bold cyan]")
+        self.console.print(f"[dim]{SUBTITLE}[/dim]\n")
+        time.sleep(0.3)
     
-    def check_ollama_installed(self) -> bool:
-        """Check Ollama"""
+    def check_prerequisites(self) -> bool:
+        """Check if Ollama is installed and running"""
         try:
-            result = subprocess.run(["ollama", "--version"], capture_output=True, text=True, check=False, encoding='utf-8', errors='replace')
+            result = subprocess.run(['ollama', 'list'], 
+                                   capture_output=True, 
+                                   text=True, 
+                                   timeout=5,
+                                   encoding='utf-8',
+                                   errors='replace')
             return result.returncode == 0
-        except FileNotFoundError:
-            return False
-    
-    def check_model_installed(self, model_name: str) -> bool:
-        """Check if model installed"""
-        try:
-            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=False, timeout=10, encoding='utf-8', errors='replace')
-            return model_name in result.stdout
-        except Exception:
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            self.console.print(Panel(
+                "[red]ERROR: Ollama not found[/red]\n\n"
+                "Install: [cyan]https://ollama.ai[/cyan]\n"
+                "Then run: [yellow]ollama serve[/yellow]",
+                title="[bold red]Error[/bold red]",
+                border_style="red"
+            ))
             return False
     
     def get_installed_models(self) -> List[str]:
-        """Get installed models"""
+        """Get list of installed Ollama models"""
         try:
-            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=False, timeout=10, encoding='utf-8', errors='replace')
+            result = subprocess.run(['ollama', 'list'], 
+                                   capture_output=True, 
+                                   text=True, 
+                                   timeout=5,
+                                   encoding='utf-8',
+                                   errors='replace')
             if result.returncode == 0:
-                lines = result.stdout.strip().split('\n')[1:]
-                models = []
-                for line in lines:
-                    if line.strip():
-                        parts = line.split()
-                        if parts:
-                            models.append(parts[0])
-                return models
-        except Exception:
+                lines = result.stdout.strip().split('\n')[1:]  # Skip header
+                return [line.split()[0] for line in lines if line.strip()]
+        except:
             pass
         return []
     
-    def download_model(self, model_name: str) -> bool:
-        """Download model with progress"""
-        self.console.print(f"\n[bold cyan]📥 Downloading {model_name}[/bold cyan]\n")
+    def display_model_selection_menu(self):
+        """Display available models"""
+        self.console.print("\n[bold cyan]AVAILABLE MODELS[/bold cyan]\n")
         
-        try:
-            process = subprocess.Popen(
-                ["ollama", "pull", model_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace'
+        table = Table(box=box.ROUNDED, border_style="cyan")
+        table.add_column("#", style="cyan", width=5)
+        table.add_column("Model", style="green")
+        table.add_column("Size", style="yellow")
+        table.add_column("Description", style="white")
+        
+        for idx, model in enumerate(FREE_MODELS, 1):
+            # Safely get model properties with defaults
+            model_name = model.get("name", f"model-{idx}")
+            model_size = model.get("size", "Unknown")
+            model_desc = model.get("description", "No description available")
+            
+            table.add_row(
+                str(idx),
+                model_name,
+                model_size,
+                model_desc
             )
-            
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                console=self.console
-            ) as progress:
-                task = progress.add_task(f"Downloading {model_name}", total=100)
-                
-                for line in process.stdout:
-                    if "%" in line:
-                        try:
-                            percent = re.search(r'(\d+)%', line)
-                            if percent:
-                                progress.update(task, completed=int(percent.group(1)))
-                        except:
-                            pass
-                    progress.update(task, description=line.strip()[:50])
-            
-            process.wait()
-            
-            if process.returncode == 0:
-                self.console.print(f"\n[bold green]✓ Successfully downloaded {model_name}[/bold green]\n")
-                return True
-            else:
-                self.console.print(f"\n[bold red]✗ Download failed[/bold red]\n")
-                return False
-                
-        except Exception as e:
-            self.console.print(f"\n[bold red]✗ Error: {str(e)}[/bold red]\n")
-            return False
+        
+        self.console.print(table)
+        self.console.print()
     
-    def chat_with_model(self, model_name: str, user_message: str) -> Optional[str]:
-        """Chat with model"""
+    def select_model(self) -> Optional[str]:
+        """Model selection with error handling"""
         try:
-            process = subprocess.Popen(
-                ["ollama", "run", model_name],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            choice = Prompt.ask(
+                "[cyan]Select model[/cyan]",
+                choices=[str(i) for i in range(1, len(FREE_MODELS) + 1)] + ['cancel']
+            )
+            
+            if choice == 'cancel':
+                return None
+            
+            model = FREE_MODELS[int(choice) - 1]
+            model_name = model.get("name")
+            
+            if not model_name:
+                self.console.print("[red]ERROR: Invalid model configuration[/red]")
+                return None
+            
+            # Check if already installed
+            installed = self.get_installed_models()
+            if model_name not in installed:
+                self.console.print(f"\n[yellow]Installing {model_name}...[/yellow]\n")
+                try:
+                    subprocess.run(['ollama', 'pull', model_name], check=True)
+                    self.console.print(f"[green]SUCCESS: Installed {model_name}[/green]\n")
+                except subprocess.CalledProcessError:
+                    self.console.print(f"[red]ERROR: Failed to install {model_name}[/red]\n")
+                    return None
+            
+            return model_name
+        except (ValueError, IndexError, KeyError) as e:
+            self.console.print(f"[red]ERROR: Invalid selection - {e}[/red]")
+            return None
+    
+    def show_thinking_animation(self):
+        """Show thinking animation"""
+        return Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=True,
+            console=self.console
+        )
+    
+    def chat_with_model(self, model: str, prompt: str) -> Optional[str]:
+        """Simple chat with model"""
+        try:
+            result = subprocess.run(
+                ['ollama', 'run', model, prompt],
+                capture_output=True,
                 text=True,
+                timeout=120,
                 encoding='utf-8',
                 errors='replace'
             )
             
-            stdout, stderr = process.communicate(input=user_message, timeout=120)
-            
-            if process.returncode == 0 and stdout.strip():
-                response = stdout.strip()
-                self.conversation_history.append({"role": "user", "content": user_message})
-                self.conversation_history.append({"role": "assistant", "content": response})
-                return response
+            if result.returncode == 0:
+                return result.stdout.strip()
             else:
+                self.console.print(f"[red]Model error: {result.stderr}[/red]")
                 return None
                 
         except subprocess.TimeoutExpired:
             self.console.print("[red]Request timed out[/red]")
-            process.kill()
             return None
         except Exception as e:
             self.console.print(f"[red]Error: {str(e)}[/red]")
             return None
     
-    def chat_with_model_for_build(self, model_name: str, user_message: str) -> Optional[str]:
-        """Chat for build mode with file operation instructions"""
+    def chat_with_model_for_build(self, model: str, user_request: str) -> Optional[str]:
+        """Enhanced build-focused prompt that creates proper folder structure"""
         
-        # Check if user is actually asking to create files
-        create_keywords = ['create', 'make', 'build', 'generate', 'write', 'add', 'new file', 'setup']
-        should_create_files = any(keyword in user_message.lower() for keyword in create_keywords)
-        
-        if not should_create_files:
-            # Just chat normally without trying to create files
-            return self.chat_with_model(model_name, user_message)
-        
-        enhanced_prompt = f"""You are a terminal code generation agent that creates complete projects from natural language descriptions.
+        # Create a smart, adaptive prompt
+        build_prompt = f"""You are a code generation assistant. The user wants to build: {user_request}
 
-User request: {user_message}
+CRITICAL INSTRUCTIONS:
+1. Analyze what the user wants to build (web app, Python script, API, CLI tool, etc.)
+2. Generate COMPLETE, WORKING code for their request
+3. Create a PROPER folder/directory structure based on the project type
+4. Include ALL necessary files (config, dependencies, documentation)
 
-CRITICAL: Respond ONLY in this EXACT format. No explanations, no extra text.
+MANDATORY FORMAT - Follow this EXACTLY:
 
-FOLDER: [project-folder]
-FILE: [folder]/filename.ext
-```language
-[complete working file content]
-RULES:
+PROJECT: [brief project name]
 
-Infer tech stack from request (Flask→.py+requirements.txt, React→.jsx+package.json, HTML→.html/.css/.js, Django→manage.py+settings.py, etc.)
+FILES:
+---
+PATH: folder_name/file.ext
+CONTENT:
+[complete file content here]
+---
+PATH: another_folder/subfolder/file.ext
+CONTENT:
+[complete file content here]
+---
 
-Create realistic multi-file projects with proper folder structure
+FOLDER STRUCTURE EXAMPLES:
 
-Use correct syntax highlighting (python, html, css, javascript, ```json, etc.)
+Flask Web App:
+---
+PATH: app.py
+CONTENT:
+[Flask application code]
+---
+PATH: requirements.txt
+CONTENT:
+[dependencies]
+---
+PATH: templates/index.html
+CONTENT:
+[HTML template]
+---
+PATH: static/css/style.css
+CONTENT:
+[CSS styles]
+---
 
-Make files RUNNABLE immediately
+React App:
+---
+PATH: package.json
+CONTENT:
+[package config]
+---
+PATH: public/index.html
+CONTENT:
+[HTML]
+---
+PATH: src/App.js
+CONTENT:
+[React component]
+---
+PATH: src/index.js
+CONTENT:
+[entry point]
+---
 
-Include requirements.txt/package.json/README.md when needed
+Python CLI Tool:
+---
+PATH: main.py
+CONTENT:
+[main script]
+---
+PATH: requirements.txt
+CONTENT:
+[dependencies]
+---
+PATH: README.md
+CONTENT:
+[documentation]
+---
 
-EXAMPLES:
+IMPORTANT:
+- Use folder/file.ext format for nested files
+- This will automatically create the folder structure
+- Include configuration files (package.json, requirements.txt, etc.)
+- Add README.md with setup instructions
+- Make code production-ready with error handling
 
-HTML/CSS/JS site:
-FOLDER: website
-FILE: website/index.html
+Now generate the COMPLETE project with PROPER folder structure for: {user_request}"""
 
-xml
-<!DOCTYPE html>
-<html>
-<head><title>My Site</title></head>
-<body><h1>Hello World</h1></body>
-</html>
-FILE: website/style.css
-
-css
-h1 {{ color: blue; }}
-Flask API:
-FOLDER: api
-FILE: api/app.py
-
-python
-from flask import Flask
-app = Flask(__name__)
-
-@app.route('/')
-def hello(): return 'Hello World!'
-
-if __name__ == '__main__':
-    app.run(debug=True)
-FILE: api/requirements.txt
-
-text
-Flask==3.0.0
-React app:
-FOLDER: react-app
-FILE: react-app/src/App.jsx
-
-jsx
-function App() {{
-  return <h1>Hello React!</h1>;
-}}
-export default App;
-FILE: react-app/package.json
-
-json
-{{"name": "react-app", "dependencies": {{"react": "^18.0.0"}}}}
-Now create the complete project for: {user_message}"""
-        
         try:
-            process = subprocess.Popen(
-                ["ollama", "run", model_name],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            result = subprocess.run(
+                ['ollama', 'run', model, build_prompt],
+                capture_output=True,
                 text=True,
+                timeout=180,
                 encoding='utf-8',
-                errors='replace'
+                errors='replace'  # Handle encoding errors
             )
             
-            stdout, stderr = process.communicate(input=enhanced_prompt, timeout=120)
-            
-            if process.returncode == 0 and stdout.strip():
-                response = stdout.strip()
-                return response
+            if result.returncode == 0:
+                return result.stdout.strip()
             else:
+                self.console.print(f"[red]Model error: {result.stderr}[/red]")
                 return None
                 
         except subprocess.TimeoutExpired:
-            self.console.print("[red]Request timed out[/red]")
-            process.kill()
+            self.console.print("[red]Request timed out (code generation can take a while)[/red]")
             return None
         except Exception as e:
             self.console.print(f"[red]Error: {str(e)}[/red]")
             return None
     
     def parse_file_operations(self, response: str) -> bool:
-        """Parse response for file operations"""
+        """Parse response and extract file operations"""
         self.filesystem.clear_pending()
-        found_operations = False
         
-        # Find folders - more flexible pattern
-        folder_patterns = [
-            r'FOLDER:\s*(.+)',
-            r'Folder:\s*(.+)',
-            r'folder:\s*(.+)',
-            r'Directory:\s*(.+)',
-        ]
-        
-        for pattern in folder_patterns:
-            for match in re.finditer(pattern, response, re.IGNORECASE):
-                folder_path = match.group(1).strip()
-                if self.filesystem.plan_folder(folder_path):
-                    found_operations = True
-        
-        # Find files with content - multiple patterns
-        file_patterns = [
-            r'FILE:\s*([^\n]+)\n```(?:\w+)?\n(.*?)```',
-            r'File:\s*([^\n]+)\n```(?:\w+)?\n(.*?)```',
-            r'file:\s*([^\n]+)\n```(?:\w+)?\n(.*?)```',
-            # Also try without FILE: prefix if we see code blocks with filenames
-            r'`([^\s`]+\.\w+)`\n```(?:\w+)?\n(.*?)```',
-        ]
-        
-        for pattern in file_patterns:
-            for match in re.finditer(pattern, response, re.DOTALL | re.IGNORECASE):
-                file_path = match.group(1).strip()
-                content = match.group(2).strip()
-                if self.filesystem.plan_file(file_path, content):
-                    found_operations = True
-        
-        return found_operations
-    
-    def display_animated_intro(self):
-        """Display animated intro"""
-        self.console.clear()
-        self.console.print(f"{BANNER}", justify="left")
-        self.console.print(f"{SUBTITLE}", justify="left")
-        self.console.print()
-        
-        for countdown in range(3, 0, -1):
-            self.console.print(f"[cyan]Initializing... {countdown}s[/cyan]", end="\r")
-            time.sleep(1)
-        
-        self.console.print(" " * 50, end="\r")
-        self.console.print("[green]✓ Ready![/green]")
-        time.sleep(0.5)
-        self.console.print()
-    
-    def check_prerequisites(self) -> bool:
-        """Check prerequisites"""
-        self.console.print("[bold cyan]>> Checking system[/bold cyan]\n")
-        
-        if not self.check_ollama_installed():
-            self.console.print("[bold red]✗ Ollama not found[/bold red]\n")
-            
-            error = Panel(
-                "[yellow]Ollama is required[/yellow]\n\n"
-                "[white]macOS:[/white]  brew install ollama\n"
-                "[white]Linux:[/white]  curl -fsSL https://ollama.ai/install.sh | sh\n"
-                "[white]Windows:[/white]  Visit https://ollama.ai",
-                title="Missing: Ollama",
-                border_style="yellow",
-                padding=(1, 2)
-            )
-            self.console.print(error)
+        # Look for FILES: section
+        if "FILES:" not in response:
             return False
         
-        self.console.print("[bold green]✓ Ollama ready[/bold green]\n")
-        time.sleep(0.5)
-        return True
-    
-    def display_model_selection_menu(self):
-        """Display enhanced model selection with color-coded status"""
-        self.console.print("[bold cyan]╔═══════════════════════════════════════════════════════════════╗[/bold cyan]")
-        self.console.print("[bold cyan]║              🤖  MODEL SELECTION & MANAGEMENT  🤖              ║[/bold cyan]")
-        self.console.print("[bold cyan]╚═══════════════════════════════════════════════════════════════╝[/bold cyan]\n")
+        # Extract files section
+        files_section = response.split("FILES:")[1] if "FILES:" in response else response
         
-        installed = self.get_installed_models()
+        # Parse each file block
+        file_blocks = re.split(r'\n---\n', files_section)
+        files_created = 0
         
-        table = Table(box=box.DOUBLE_EDGE, border_style="cyan", header_style="bold magenta")
-        table.add_column("#", style="cyan", width=4)
-        table.add_column("Model", style="white", width=22)
-        table.add_column("Description", style="dim white", width=32)
-        table.add_column("Size", style="yellow", width=10)
-        table.add_column("Status", style="white", width=15)
-        
-        for key, model in FREE_MODELS.items():
-            name = model['name']
-            is_installed = name in installed
+        for block in file_blocks:
+            if not block.strip():
+                continue
             
-            # Add star for recommended
-            display_name = f"⭐ {name}" if model['recommended'] else name
+            # Extract PATH and CONTENT
+            path_match = re.search(r'PATH:\s*(.+?)(?:\n|$)', block)
+            content_match = re.search(r'CONTENT:\s*\n(.*)', block, re.DOTALL)
             
-            # Color-coded status
-            if is_installed:
-                status = "[green]● READY[/green]"
-            else:
-                status = "[red]○ NOT INSTALLED[/red]"
-            
-            table.add_row(
-                key,
-                display_name,
-                model['description'],
-                model['size'],
-                status
-            )
-        
-        self.console.print(table)
-        self.console.print()
-        self.console.print("[dim]Legend: ⭐ Recommended | [green]● Ready to use[/green] | [red]○ Needs download[/red][/dim]\n")
-    
-    def select_model(self) -> Optional[str]:
-        """Enhanced model selection"""
-        while True:
-            choice = Prompt.ask(
-                "[cyan]Select model number[/cyan]",
-                choices=list(FREE_MODELS.keys()),
-                default="1"
-            )
-            
-            model = FREE_MODELS[choice]
-            model_name = model["name"]
-            
-            self.console.print()
-            
-            if not self.check_model_installed(model_name):
-                self.console.print(Panel(
-                    f"[yellow]Model:[/yellow] {model_name}\n"
-                    f"[yellow]Size:[/yellow] {model['size']}\n"
-                    f"[yellow]Status:[/yellow] Not installed",
-                    title="⚠️  Download Required",
-                    border_style="yellow"
-                ))
-                self.console.print()
+            if path_match and content_match:
+                file_path = path_match.group(1).strip()
+                file_content = content_match.group(1).strip()
                 
-                if Confirm.ask(f"[cyan]Download {model_name}?[/cyan]", default=True):
-                    if self.download_model(model_name):
-                        return model_name
-                    continue
-                else:
-                    if not Confirm.ask("[yellow]Try another model?[/yellow]", default=True):
-                        return None
-                    self.console.print()
-                    self.display_model_selection_menu()
-                    continue
-            else:
-                self.console.print(f"[green]✓ {model_name} is ready![/green]\n")
-                return model_name
+                # Clean up the content (remove markdown code blocks if present)
+                file_content = re.sub(r'^```[\w]*\n', '', file_content)
+                file_content = re.sub(r'\n```$', '', file_content)
+                
+                # Create parent directories if needed
+                if '/' in file_path:
+                    parent_dir = '/'.join(file_path.split('/')[:-1])
+                    self.filesystem.plan_folder(parent_dir)
+                
+                # Add file
+                if self.filesystem.plan_file(file_path, file_content):
+                    files_created += 1
+        
+        return files_created > 0
     
     def show_mode_menu(self):
-        """Display mode selection menu"""
-        mode_colors = {
-            "chat": "cyan",
-            "build": "magenta",
-            "analyze": "yellow"
+        """Show current mode with better visibility"""
+        mode_displays = {
+            "build": "[bold black on magenta] BUILD MODE [/bold black on magenta]",
+            "chat": "[bold black on cyan] CHAT MODE [/bold black on cyan]",
+            "analyze": "[bold black on yellow] ANALYZE MODE [/bold black on yellow]"
         }
         
-        mode_icons = {
-            "chat": "🗨",
-            "build": "🔨",
-            "analyze": "🔍"
-        }
+        display = mode_displays.get(self.mode, f"[bold white] {self.mode.upper()} [/bold white]")
         
-        color = mode_colors[self.mode]
-        icon = mode_icons[self.mode]
-        
-        self.console.print(f"\n[bold {color}]{icon} Current Mode: {self.mode.upper()}[/bold {color}]")
-        self.console.print("[yellow]Commands: /chat | /build | /analyze | /help | /exit[/yellow]\n")
+        self.console.print(f"\n{display}")
+        self.console.print("[dim]Commands: /help | /chat | /build | /analyze | /model | /exit[/dim]\n")
     
-    def handle_analyze_mode(self):
-        """Handle code analysis mode"""
-        self.console.print(Panel(
-            "[bold]Code Analysis Commands:[/bold]\n\n"
-            "[cyan]analyze[/cyan] - Analyze entire codebase\n"
-            "[cyan]analyze <path>[/cyan] - Analyze specific directory\n"
-            "[cyan]search <pattern>[/cyan] - Search for pattern in code\n"
-            "[yellow]/chat[/yellow] - Switch to chat mode\n"
-            "[yellow]/build[/yellow] - Switch to build mode\n"
-            "[yellow]/exit[/yellow] - Quit application",
-            title="[yellow]🔍 Analysis Mode[/yellow]",
-            border_style="yellow",
-            box=box.DOUBLE_EDGE
-        ))
+    def show_help(self, mode: str = None):
+        """Show comprehensive help"""
+        self.console.print("\n[bold cyan]" + "="*60 + "[/bold cyan]")
+        self.console.print("[bold cyan]              LocalAgent - Help Guide              [/bold cyan]")
+        self.console.print("[bold cyan]" + "="*60 + "[/bold cyan]\n")
+        
+        # Mode Switching
+        self.console.print("[bold yellow]MODE SWITCHING:[/bold yellow]")
+        self.console.print("  /chat      - Switch to chat mode (general Q&A)")
+        self.console.print("  /build     - Switch to build mode (create projects)")
+        self.console.print("  /analyze   - Switch to analyze mode (inspect code)")
         self.console.print()
         
+        # Model Management
+        self.console.print("[bold green]MODEL MANAGEMENT:[/bold green]")
+        self.console.print("  /model     - Change AI model")
+        self.console.print("  /models    - List available models")
+        self.console.print()
+        
+        # Build Mode
+        if mode == "build" or mode is None:
+            self.console.print("[bold magenta]BUILD MODE:[/bold magenta]")
+            self.console.print("  Just describe what you want to build!")
+            self.console.print()
+            self.console.print("  [cyan]Examples:[/cyan]")
+            self.console.print("    - Create a Flask REST API for user management")
+            self.console.print("    - Build a React todo app with local storage")
+            self.console.print("    - Make a Python CLI tool for file encryption")
+            self.console.print("    - Create an Express.js API with MongoDB")
+            self.console.print("    - Build an HTML/CSS/JS portfolio website")
+            self.console.print("    - Create a FastAPI app with authentication")
+            self.console.print()
+        
+        # Chat Mode
+        if mode == "chat" or mode is None:
+            self.console.print("[bold cyan]CHAT MODE:[/bold cyan]")
+            self.console.print("  Ask anything - coding help, explanations, debugging, etc.")
+            self.console.print()
+        
+        # Analyze Mode
+        if mode == "analyze" or mode is None:
+            self.console.print("[bold yellow]ANALYZE MODE:[/bold yellow]")
+            self.console.print("  analyze [path]     - Analyze directory/codebase")
+            self.console.print("  search <pattern>   - Search for code patterns")
+            self.console.print()
+        
+        # General
+        self.console.print("[bold white]GENERAL:[/bold white]")
+        self.console.print("  /help      - Show this help")
+        self.console.print("  /exit      - Exit the agent")
+        self.console.print()
+        
+        self.console.print("[bold cyan]" + "="*60 + "[/bold cyan]\n")
+    
+    def handle_model_change(self):
+        """Handle model switching"""
+        installed = self.get_installed_models()
+        
+        self.console.print("\n[bold cyan]AVAILABLE MODELS[/bold cyan]\n")
+        
+        # Show installed models
+        if installed:
+            self.console.print("[bold green]Installed:[/bold green]")
+            for i, model in enumerate(installed, 1):
+                current = " [yellow]<- current[/yellow]" if model == self.current_model else ""
+                self.console.print(f"  {i}. {model}{current}")
+            self.console.print()
+        else:
+            self.console.print("[yellow]No models installed yet[/yellow]\n")
+        
+        # Show available models
+        self.console.print("[bold yellow]Available to install:[/bold yellow]")
+        for i, model in enumerate(FREE_MODELS, 1):
+            model_name = model.get("name", "unknown")
+            model_desc = model.get("description", "")
+            if model_name not in installed:
+                self.console.print(f"  {i}. {model_name} - {model_desc}")
+        
+        self.console.print()
+        
+        choice = Prompt.ask("[cyan]Select model number or 'cancel'[/cyan]")
+        
+        if choice.lower() == 'cancel':
+            return
+        
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(installed):
+                self.current_model = installed[idx]
+                self.console.print(f"\n[green]SUCCESS: Switched to {self.current_model}[/green]\n")
+            elif 0 <= idx < len(FREE_MODELS):
+                new_model = self.select_model()
+                if new_model:
+                    self.current_model = new_model
+        except ValueError:
+            self.console.print("[red]Invalid choice[/red]")
+    
+    def handle_analyze_mode(self):
+        """Handle analyze mode interactions"""
         while self.mode == "analyze":
             try:
-                user_input = Prompt.ask(f"[bold yellow]analyze[/bold yellow]")
+                user_input = Prompt.ask(f"[bold black on yellow] ANALYZE [/bold black on yellow] >>>")
                 
                 if user_input.lower() in ['exit', '/exit']:
                     return 'exit'
@@ -854,6 +758,10 @@ Now create the complete project for: {user_message}"""
                 if user_input.lower() in ['build', '/build']:
                     self.mode = "build"
                     return None
+                
+                if user_input.lower() in ['/help', 'help']:
+                    self.show_help('analyze')
+                    continue
                 
                 if user_input.lower().startswith('analyze'):
                     parts = user_input.split(maxsplit=1)
@@ -875,7 +783,7 @@ Now create the complete project for: {user_message}"""
                             table.add_column("Line", style="magenta", justify="right")
                             table.add_column("Content", style="white")
                             
-                            for result in results[:50]:  # Limit to 50 results
+                            for result in results[:50]:
                                 table.add_row(
                                     result["file"],
                                     str(result["line"]),
@@ -914,7 +822,7 @@ Now create the complete project for: {user_message}"""
             self.console.print(table)
             self.console.print()
             
-            if Confirm.ask("[cyan]Use installed?[/cyan]", default=True):
+            if Confirm.ask("[cyan]Use installed model?[/cyan]", default=True):
                 if len(installed) == 1:
                     self.current_model = installed[0]
                 else:
@@ -923,14 +831,16 @@ Now create the complete project for: {user_message}"""
         
         # If no installed model selected, show available models
         if not self.current_model:
+            self.console.print("\n[yellow]No models installed. Please select a model to install:[/yellow]\n")
             self.display_model_selection_menu()
             self.current_model = self.select_model()
         
         if not self.current_model:
+            self.console.print("\n[red]No model selected. Exiting...[/red]\n")
             return
         
         # Main interaction loop
-        self.console.print(f"\n[bold green]✓ Agent Active[/bold green]")
+        self.console.print(f"\n[bold green]AGENT ACTIVE[/bold green]")
         self.console.print(f"[dim]Model: {self.current_model}[/dim]\n")
         
         self.show_mode_menu()
@@ -939,9 +849,9 @@ Now create the complete project for: {user_message}"""
             try:
                 # Get mode-specific prompt
                 if self.mode == "chat":
-                    prompt_text = f"[bold cyan]chat({self.current_model})[/bold cyan]"
+                    prompt_text = f"[bold black on cyan] CHAT [/bold black on cyan] >>>"
                 elif self.mode == "build":
-                    prompt_text = f"[bold magenta]🔨 build[/bold magenta]"
+                    prompt_text = f"[bold black on magenta] BUILD [/bold black on magenta] >>>"
                 else:  # analyze
                     if self.handle_analyze_mode() == 'exit':
                         break
@@ -957,8 +867,13 @@ Now create the complete project for: {user_message}"""
                 
                 # Handle exit
                 if user_input.lower() in ['exit', 'quit', '/exit', '/quit']:
-                    self.console.print("\n[green]👋 Goodbye![/green]\n")
+                    self.console.print("\n[green]Goodbye![/green]\n")
                     break
+                
+                # Handle model switching
+                if user_input.lower() in ['/model', '/models']:
+                    self.handle_model_change()
+                    continue
                 
                 # Handle mode switching with /commands
                 if user_input.lower() in ['chat', '/chat']:
@@ -980,7 +895,7 @@ Now create the complete project for: {user_message}"""
                 # Process based on mode
                 if self.mode == "build":
                     with self.show_thinking_animation() as progress:
-                        task = progress.add_task("Planning your build...", total=None)
+                        task = progress.add_task("[cyan]Planning your build...", total=None)
                         response = self.chat_with_model_for_build(self.current_model, user_input)
                     
                     self.console.print()
@@ -988,8 +903,8 @@ Now create the complete project for: {user_message}"""
                     if response:
                         # Try to parse and create files
                         if self.parse_file_operations(response):
-                            # Show what will be created
-                            self.console.print("[bold magenta]📋 Files to create:[/bold magenta]\n")
+                            # Show what will be created with animation
+                            self.console.print("[bold magenta]FILES TO CREATE:[/bold magenta]\n")
                             tree = self.filesystem.get_preview_tree()
                             self.console.print(tree)
                             self.console.print()
@@ -1010,7 +925,7 @@ Now create the complete project for: {user_message}"""
                 
                 else:  # chat mode
                     with self.show_thinking_animation() as progress:
-                        task = progress.add_task("Thinking...", total=None)
+                        task = progress.add_task("[cyan]Thinking...", total=None)
                         response = self.chat_with_model(self.current_model, user_input)
                     
                     self.console.print()
@@ -1035,7 +950,9 @@ if __name__ == "__main__":
         agent = LocalAgent()
         agent.start()
     except KeyboardInterrupt:
-        print("\n\n👋 Goodbye!")
+        print("\n\nGoodbye!")
     except Exception as e:
         print(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
