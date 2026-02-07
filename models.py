@@ -2,8 +2,6 @@
 Available Free Models for LocalAgent
 Ollama models available for download and use
 """
-print("------------More Model to be Added Soon---------------")
-
 FREE_MODELS = [
     {
         "name": "qwen2.5-coder:7b",
