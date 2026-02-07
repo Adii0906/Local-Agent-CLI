@@ -2,56 +2,47 @@
 Available Free Models for LocalAgent
 Ollama models available for download and use
 """
+print("------------More Model to be Added Soon---------------")
 
 FREE_MODELS = [
     {
+        "name": "qwen2.5-coder:7b",
+        "size": "4.7 GB",
+        "description": "Recommended - Best for code generation"
+    },
+    {
+        "name": "qwen2.5-coder:3b",
+        "size": "2.0 GB",
+        "description": "Fast - Good for simple tasks"
+    },
+    {
+        "name": "deepseek-coder-v2:16b",
+        "size": "9.0 GB",
+        "description": "High quality - Best for complex projects"
+    },
+    {
+        "name": "codellama:7b",
+        "size": "3.8 GB",
+        "description": "Meta's code model - Good alternative"
+    },
+    {
+        "name": "codegemma:7b",
+        "size": "5.0 GB",
+        "description": "Google's code model - Strong performance"
+    },
+    {
         "name": "llama3.2:3b",
         "size": "2.0 GB",
-        "desc": "Fast and efficient"
+        "description": "Fast and efficient general model"
     },
     {
         "name": "phi3:mini",
         "size": "2.3 GB",
-        "desc": "Microsoft's compact model"
+        "description": "Microsoft's compact model"
     },
     {
         "name": "mistral:7b",
         "size": "4.1 GB",
-        "desc": "High quality responses"
-    },
-    {
-        "name": "gemma2:2b",
-        "size": "1.6 GB",
-        "desc": "Google's efficient model"
-    },
-    {
-        "name": "qwen2.5:3b",
-        "size": "2.0 GB",
-        "desc": "Alibaba's multilingual"
-    },
-    {
-        "name": "neural-chat:7b",
-        "size": "4.1 GB",
-        "desc": "Optimized for dialogue"
-    },
-    {
-        "name": "starling-lm:7b",
-        "size": "4.1 GB",
-        "desc": "Conversational AI"
-    },
-    {
-        "name": "openchat:7b",
-        "size": "4.0 GB",
-        "desc": "Fast and capable"
-    },
-    {
-        "name": "orca2:13b",
-        "size": "7.3 GB",
-        "desc": "Reasoning and logic"
-    },
-    {
-        "name": "zephyr:7b",
-        "size": "4.1 GB",
-        "desc": "Fine-tuned for instructions"
+        "description": "High quality general responses"
     }
 ]
