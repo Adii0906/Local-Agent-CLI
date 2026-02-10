@@ -1,6 +1,7 @@
 """
 Available Free Models for LocalAgent
 Ollama models available for download and use
+Note:Add other models if required then run the agent.py and it will list the model and you can download and free to go 
 """
 FREE_MODELS = [
     {
