@@ -46,13 +46,24 @@ class Style:
     def cyan(self, t: str) -> str: return self._wrap("36", t)
 
 
+FANCY_SYMBOLS = {"ok": "✓", "fail": "✗", "run": "→", "warn": "!", "dot": "•", "on": "●", "off": "○",
+                 "tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│"}
+ASCII_SYMBOLS = {"ok": "+", "fail": "x", "run": ">", "warn": "!", "dot": "*", "on": "(*)", "off": "( )",
+                 "tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|"}
+
+
 def _symbols(stream: TextIO) -> Dict[str, str]:
-    fancy = {"ok": "✓", "fail": "✗", "run": "→", "warn": "!", "dot": "•"}
     try:
-        "✓✗→•".encode(getattr(stream, "encoding", None) or "ascii")
-        return fancy
+        "".join(FANCY_SYMBOLS.values()).encode(getattr(stream, "encoding", None) or "ascii")
+        return dict(FANCY_SYMBOLS)
     except (UnicodeEncodeError, LookupError):
-        return {"ok": "+", "fail": "x", "run": ">", "warn": "!", "dot": "*"}
+        return dict(ASCII_SYMBOLS)
+
+
+def visible_len(text: str) -> int:
+    import re
+
+    return len(re.sub(r"\033\[[0-9;?]*[A-Za-z]", "", text))
 
 
 class TerminalUI(AgentUI):
@@ -75,6 +86,33 @@ class TerminalUI(AgentUI):
 
     def width(self) -> int:
         return max(60, min(shutil.get_terminal_size((100, 20)).columns, 120))
+
+    def box(self, lines: List[str], width: int = 48) -> None:
+        """A rounded box (ASCII on terminals that can't encode box characters)."""
+        y = self.sym
+        inner = max([width] + [visible_len(l) + 4 for l in lines])
+        self.print(self.s.cyan(y["tl"] + y["h"] * inner + y["tr"]))
+        for line in [""] + lines + [""]:
+            pad = inner - visible_len(line) - 3
+            self.print(self.s.cyan(y["v"]) + "   " + line + " " * max(pad, 0) + self.s.cyan(y["v"]))
+        self.print(self.s.cyan(y["bl"] + y["h"] * inner + y["br"]))
+
+    def check(self, ok: Optional[bool], label: str, detail: str = "", hint: str = "") -> None:
+        """One result line. Only call after the thing being reported has actually happened."""
+        if ok is True:
+            mark = self.s.green(self.sym["ok"])
+        elif ok is False:
+            mark = self.s.red(self.sym["fail"])
+        else:
+            mark = self.s.yellow(self.sym["warn"])
+        text = f"{label}: {detail}" if detail else label
+        self.print(f"  {mark} {text}")
+        if hint:
+            self.print(self.s.dim(f"      {hint}"))
+
+    def step(self, number: int, total: int, title: str) -> None:
+        self.print()
+        self.print(self.s.bold(f"[{number}/{total}] {title}"))
 
     def diff(self, text: str, max_lines: int = 60) -> None:
         lines = text.splitlines()

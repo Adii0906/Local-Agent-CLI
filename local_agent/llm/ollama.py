@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
-from local_agent.errors import ProviderError, ProviderUnavailable
+from local_agent.errors import ModelNotFound, ProviderError, ProviderUnavailable
 from local_agent.llm.base import (
     ChatResponse, Message, ModelInfo, Provider, TextCallback, ToolCall, Usage, iter_lines, open_request, parse_arguments,
 )
@@ -29,43 +30,112 @@ class OllamaProvider(Provider):
     def _service(self) -> str:
         return f"Ollama ({self.base_url})"
 
-    def list_models(self) -> List[str]:
+    def version(self) -> str:
+        """Server version; proves the service is actually running (not just installed)."""
+        resp = open_request(f"{self.base_url}/api/version", None, timeout=5, service=self._service())
+        with resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        return str(data.get("version", "unknown"))
+
+    def list_models_detailed(self) -> List[Dict[str, Any]]:
+        """Installed models with size and details, as reported by ``/api/tags``."""
         resp = open_request(f"{self.base_url}/api/tags", None, timeout=10, service=self._service())
         with resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        out = []
+        for m in data.get("models", []) or []:
+            if not m.get("name"):
+                continue
+            details = m.get("details") or {}
+            out.append({
+                "name": m["name"],
+                "size": int(m.get("size") or 0),
+                "family": details.get("family", ""),
+                "parameter_size": details.get("parameter_size", ""),
+                "quantization": details.get("quantization_level", ""),
+            })
+        return out
 
-    def model_info(self) -> ModelInfo:
-        if self._info is not None:
-            return self._info
+    def list_models(self) -> List[str]:
+        return [m["name"] for m in self.list_models_detailed()]
+
+    def _show(self, name: str) -> Dict[str, Any]:
         try:
-            resp = open_request(f"{self.base_url}/api/show", {"model": self.model}, timeout=30, service=self._service())
+            resp = open_request(f"{self.base_url}/api/show", {"model": name}, timeout=30, service=self._service())
         except ProviderUnavailable as exc:
             if "404" in str(exc):
-                raise ProviderUnavailable(
-                    f"Model '{self.model}' is not installed in Ollama.", hint=f"Run: ollama pull {self.model}"
-                ) from None
-            raise ProviderUnavailable(str(exc), hint="Start Ollama with `ollama serve` or set base_url.") from None
+                raise ModelNotFound(name, f"Model '{name}' is not installed in Ollama.", hint=f"Run: ollama pull {name}") from None
+            raise ProviderUnavailable(str(exc), hint="Start Ollama with `ollama serve` (or open the Ollama app), or set base_url.") from None
         with resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8") or "{}")
+
+    @staticmethod
+    def _supports_tools(data: Dict[str, Any]) -> Optional[bool]:
+        caps = data.get("capabilities")
+        if isinstance(caps, list):
+            return "tools" in caps
+        template = data.get("template") or ""  # older Ollama: infer from the chat template
+        return True if ".Tools" in template or "tools" in template.lower() else None
+
+    def capabilities(self, name: str) -> Dict[str, Any]:
+        """{'tools': bool|None, 'embedding': bool, 'context_length': int|None} for any installed model."""
+        data = self._show(name)
+        caps = data.get("capabilities") if isinstance(data.get("capabilities"), list) else []
         ctx = None
         for key, value in (data.get("model_info") or {}).items():
             if key.endswith(".context_length") and isinstance(value, int):
                 ctx = value
-        caps = data.get("capabilities")
-        if isinstance(caps, list):
-            supports = "tools" in caps
-        else:  # older Ollama: infer from the chat template
-            template = data.get("template") or ""
-            supports = True if ".Tools" in template or "tools" in template.lower() else None
+        return {"tools": self._supports_tools(data), "embedding": "embedding" in caps and "completion" not in caps, "context_length": ctx}
+
+    def model_info(self) -> ModelInfo:
+        if self._info is not None:
+            return self._info
+        data = self._show(self.model)
+        ctx = None
+        for key, value in (data.get("model_info") or {}).items():
+            if key.endswith(".context_length") and isinstance(value, int):
+                ctx = value
         details = data.get("details") or {}
         self._info = ModelInfo(
             name=self.model,
             context_length=ctx,
-            supports_tools=supports,
+            supports_tools=self._supports_tools(data),
             details=f"{details.get('family', '?')} {details.get('parameter_size', '')} {details.get('quantization_level', '')}".strip(),
         )
         return self._info
+
+    def pull(
+        self,
+        name: str,
+        on_progress: Optional[Callable[["PullProgress"], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        """Download a model through ``/api/pull``, reporting real progress.
+
+        Raises ProviderError on failure. Ctrl+C propagates as KeyboardInterrupt;
+        Ollama keeps the partial download and resumes it on the next pull.
+        """
+        resp = open_request(f"{self.base_url}/api/pull", {"model": name, "stream": True}, timeout=120, service=self._service())
+        success = False
+        for line in iter_lines(resp, cancel_event, self._service()):
+            try:
+                chunk = json.loads(line)
+            except ValueError:
+                continue
+            if chunk.get("error"):
+                err = str(chunk["error"])
+                if "file does not exist" in err or "not found" in err:
+                    raise ModelNotFound(name, f"'{name}' was not found in the Ollama library.", hint="Check the exact name at https://ollama.com/library")
+                raise ProviderError(f"Download of {name} failed: {err}", retryable=True)
+            progress = PullProgress(str(chunk.get("status", "")), str(chunk.get("digest", "")), int(chunk.get("total") or 0), int(chunk.get("completed") or 0))
+            if on_progress:
+                on_progress(progress)
+            if progress.status == "success":
+                success = True
+        if not success:
+            if cancel_event is not None and cancel_event.is_set():
+                raise KeyboardInterrupt
+            raise ProviderError(f"Download of {name} ended before completing.", retryable=True)
 
     def num_ctx(self) -> int:
         if self._context_override:
@@ -134,3 +204,11 @@ class OllamaProvider(Provider):
         if cancel_event is not None and cancel_event.is_set():
             finish = "cancelled"
         return ChatResponse("".join(content), calls, usage, finish)
+
+
+@dataclass
+class PullProgress:
+    status: str
+    digest: str = ""
+    total: int = 0
+    completed: int = 0

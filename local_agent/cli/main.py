@@ -1,38 +1,52 @@
-"""Command-line entry point: ``local-agent [task] [options]``."""
+"""Command-line entry point.
+
+    local-agent                      interactive session (first run: setup wizard)
+    local-agent "task"               run one task and exit
+    local-agent setup                (re)run the setup wizard
+    local-agent models [list]        installed models
+    local-agent models use <name>    test and switch the default model
+    local-agent models pull <name>   download a model with progress
+    local-agent config [show|path|set <key> <value>]
+    local-agent doctor [--test]      diagnose Ollama, config and model
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from local_agent import __version__
-from local_agent.cli.banner import BANNER, SUBTITLE
+from local_agent.cli.prompts import Option, Prompter
 from local_agent.cli.repl import Repl
 from local_agent.cli.session import Session, build_session, resume_into
+from local_agent.cli.startup import StartupAborted, start_session
 from local_agent.cli.ui import TerminalUI
-from local_agent.config import MODES, PROVIDERS, TOOL_MODES, Settings, default_config_path, load_settings, save_user_config
+from local_agent.config import MODES, PROVIDERS, TOOL_MODES, Settings, load_settings
 from local_agent.errors import AgentError, ConfigError, ProviderUnavailable
-from local_agent.llm.catalog import RECOMMENDED_MODELS
-from local_agent.llm.factory import create_base_provider, create_provider
-from local_agent.permissions.engine import MODE_DESCRIPTIONS
+from local_agent.llm.factory import create_provider
+
+SUBCOMMANDS = ("setup", "models", "config", "doctor")
 
 
 def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="local-agent",
         description="A local-first coding agent. Run it in a project directory and describe a task.",
-        epilog="Examples:\n  local-agent\n  local-agent \"Explain this codebase\"\n  local-agent --plan \"Add input validation to the signup form\"\n  local-agent --mode auto --model qwen2.5-coder:7b \"Fix the failing tests\"",
+        epilog=(
+            "Commands:\n  local-agent setup | models [list|use <name>|pull <name>] | config [show|path|set <k> <v>] | doctor [--test]\n\n"
+            "Examples:\n  local-agent\n  local-agent \"Explain this codebase\"\n  local-agent --plan \"Add input validation to the signup form\"\n"
+            "  local-agent --mode auto --model qwen2.5-coder:7b \"Fix the failing tests\""
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("task", nargs="*", help="Task to run once, then exit. Omit for an interactive session.")
     p.add_argument("--plan", action="store_true", help="Plan mode: inspect and propose, never modify (same as --mode plan).")
-    p.add_argument("--mode", choices=MODES, help="Permission mode (default: ask).")
-    p.add_argument("--model", help="Model name, e.g. qwen2.5-coder:7b")
+    p.add_argument("--mode", choices=MODES, help="Permission mode for this run.")
+    p.add_argument("--model", help="Model name for this run, e.g. qwen2.5-coder:7b")
     p.add_argument("--provider", choices=PROVIDERS, help="Model backend (default: ollama).")
     p.add_argument("--base-url", help="Model server URL (default: http://localhost:11434 for Ollama).")
     p.add_argument("--tool-mode", choices=TOOL_MODES, help="Native tool calling, prompt-based, or auto-detect.")
@@ -43,8 +57,10 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     p.add_argument("--context-window", type=int, help="Override the model context size (tokens).")
     p.add_argument("--no-memory", action="store_true", help="Do not read or write persistent memory.")
     p.add_argument("--resume", action="store_true", help="Resume the last interrupted task in this project.")
-    p.add_argument("--setup", action="store_true", help="Interactive first-time configuration.")
-    p.add_argument("--doctor", action="store_true", help="Check model server, model capabilities and tools.")
+    p.add_argument("--setup", action="store_true", help="Same as `local-agent setup`.")
+    p.add_argument("--doctor", action="store_true", help="Same as `local-agent doctor`.")
+    p.add_argument("--test", action="store_true", help="With doctor: also send a real test request to the model.")
+    p.add_argument("--quiet", "-q", action="store_true", help="Skip the startup checklist.")
     p.add_argument("--verbose", "-v", action="store_true", help="Show tool output and debugging details.")
     p.add_argument("--version", action="version", version=f"local-agent {__version__}")
     return p.parse_args(argv)
@@ -64,137 +80,92 @@ def overrides_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     return o
 
 
-def run_setup(ui: TerminalUI, settings: Settings) -> int:
-    s = ui.s
-    ui.print(s.bold("Local Agent setup") + s.dim(f"  (writes {default_config_path()})"))
-    try:
-        provider = input(f"  Provider [ollama/openai] ({settings.provider}): ").strip() or settings.provider
-        if provider not in PROVIDERS:
-            ui.print(s.red("  Unknown provider."))
-            return 2
-        settings.provider = provider
-        default_url = settings.resolved_base_url() if provider == settings.provider else ""
-        base_url = input(f"  Server URL ({default_url}): ").strip() or None
-        settings.base_url = base_url
-        values: Dict[str, Any] = {"provider": provider}
-        if base_url:
-            values["base_url"] = base_url
-        if provider == "openai":
-            env_name = input(f"  Name of the env var holding the API key ({settings.api_key_env}, blank if none): ").strip()
-            if env_name:
-                values["api_key_env"] = env_name
-                settings.api_key_env = env_name
-            ui.print(s.dim("  The key itself is never written to the config file."))
-        installed: List[str] = []
-        settings.model = settings.model or "placeholder"
+def _split_subcommand(argv: List[str]) -> tuple:
+    """`setup`/`doctor` only count as commands when not followed by task words,
+    so `local-agent setup the database` still runs a task."""
+    if argv and argv[0] in SUBCOMMANDS:
+        rest = argv[1:]
+        if argv[0] in ("models", "config"):
+            return argv[0], rest
         try:
-            installed = create_base_provider(settings).list_models()
-        except AgentError as exc:
-            ui.print(s.yellow(f"  Could not reach the server: {exc}"))
-        choices = installed or [m["name"] for m in RECOMMENDED_MODELS]
-        ui.print("  Models " + ("installed on the server:" if installed else "(suggested; not yet installed):"))
-        for i, name in enumerate(choices, 1):
-            desc = next((m["description"] for m in RECOMMENDED_MODELS if m["name"] == name), "")
-            ui.print(f"    {i:2}. {name:28} {s.dim(desc)}")
-        pick = input("  Choose a number or type a model name: ").strip()
-        model = choices[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(choices) else pick
-        if not model:
-            ui.print(s.red("  No model chosen."))
-            return 2
-        values["model"] = model
-        if provider == "ollama" and installed and model not in installed and shutil.which("ollama"):
-            if input(f"  Download {model} now with `ollama pull`? [y/N] ").strip().lower() == "y":
-                import subprocess
-
-                subprocess.run(["ollama", "pull", model])
-        ui.print("  Default permission mode:")
-        for m in MODES:
-            ui.print(f"    {m:5} {MODE_DESCRIPTIONS[m]}")
-        mode = input("  Mode (ask): ").strip() or "ask"
-        if mode not in MODES:
-            ui.print(s.red("  Unknown mode."))
-            return 2
-        values["mode"] = mode
-    except (EOFError, KeyboardInterrupt):
-        ui.print("\n  Setup cancelled.")
-        return 1
-    path = save_user_config(values)
-    ui.print(s.green(f"  Saved {path}. Run `local-agent --doctor` to verify."))
-    return 0
+            if not parse_args(rest).task:  # only options follow, e.g. `doctor -C path --test`
+                return argv[0], rest
+        except SystemExit:
+            pass
+    return None, argv
 
 
-def run_doctor(ui: TerminalUI, settings: Settings, workspace: Path) -> int:
+def _header(ui: TerminalUI, workspace: Path) -> None:
     s = ui.s
-    ok = True
-
-    def line(good: Optional[bool], label: str, detail: str) -> None:
-        mark = s.green(ui.sym["ok"]) if good else (s.yellow(ui.sym["warn"]) if good is None else s.red(ui.sym["fail"]))
-        ui.print(f"  {mark} {label:16} {detail}")
-
-    ui.print(s.bold("Local Agent doctor"))
-    line(True, "Python", sys.version.split()[0])
-    line(True, "Config file", str(default_config_path()) + ("" if default_config_path().exists() else " (not created; using defaults)"))
-    line(True, "Workspace", str(workspace))
-    line(bool(shutil.which("git")), "git", shutil.which("git") or "not found (diff/undo still work for agent edits)")
-    line(True if shutil.which("rg") else None, "ripgrep", shutil.which("rg") or "not found; using slower Python search")
-    try:
-        settings.data_dir.mkdir(parents=True, exist_ok=True)
-        probe = settings.data_dir / ".write-test"
-        probe.write_text("ok")
-        probe.unlink()
-        line(True, "Data dir", str(settings.data_dir))
-    except OSError as exc:
-        ok = False
-        line(False, "Data dir", f"{settings.data_dir}: {exc}")
-    if not settings.model:
-        line(False, "Model", "none configured: run `local-agent --setup` or pass --model")
-        return 1
-    try:
-        provider, info, why = create_provider(settings)
-        line(True, "Server", f"{settings.provider} at {settings.resolved_base_url()}")
-        line(True, "Model", f"{info.name} {info.details}".strip())
-        line(True if info.context_length else None, "Context", f"{info.context_length or 'unknown'} tokens (model)")
-        native = provider.tool_mode == "native"
-        line(True if native else None, "Tool calling", f"{provider.tool_mode}: {why}")
-    except AgentError as exc:
-        ok = False
-        line(False, "Model server", str(exc))
-    return 0 if ok else 1
-
-
-def _make_session(settings: Settings, workspace: Path, ui: TerminalUI) -> Session:
-    provider, info, why = create_provider(settings)
-    return build_session(settings, workspace, ui, provider, info, why)
+    ui.print(f"{s.bold(s.cyan('>_ Local-Agent-CLI'))} {s.dim('v' + __version__)}  {s.dim(str(workspace))}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    sub, rest = _split_subcommand(argv)
+    args = parse_args(rest)
+    if args.setup:
+        sub = "setup"
+    elif args.doctor:
+        sub = "doctor"
     ui = TerminalUI(verbose=args.verbose)
+    prompter = Prompter(ui.s, ui.out, symbols=ui.sym)
+    interactive = ui.interactive and not args.task and sub is None
+
     try:
-        settings = load_settings(overrides_from_args(args))
         workspace = Path(args.workspace or os.getcwd()).resolve()
         if not workspace.is_dir():
             raise ConfigError(f"Workspace {workspace} is not a directory")
-        if args.setup:
-            return run_setup(ui, settings)
-        if args.doctor:
-            return run_doctor(ui, settings, workspace)
-        if not settings.model:
-            if sys.stdin.isatty() and not args.task:
-                ui.print("No model configured yet. Starting setup.\n")
-                rc = run_setup(ui, settings)
-                if rc != 0:
-                    return rc
-                settings = load_settings(overrides_from_args(args))
-            else:
-                raise ConfigError("No model configured.", hint="Run `local-agent --setup` or pass --model NAME.")
-        if settings.mode == "full" and sys.stdin.isatty():
-            ui.print(ui.s.red("Full-control mode: ordinary commands run without asking and are not sandboxed."))
 
-        session = _make_session(settings, workspace, ui)
-        if session.memory:
-            for w in session.memory.warnings():
-                ui.notice(w, "warning")
+        if sub == "setup":
+            from local_agent.cli.commands import cmd_setup
+
+            return cmd_setup(ui, prompter, load_settings(overrides_from_args(args), lenient=True))
+        if sub == "doctor":
+            from local_agent.cli.commands import cmd_doctor
+
+            return cmd_doctor(ui, load_settings(overrides_from_args(args), lenient=True), workspace, test=args.test)
+        if sub == "models":
+            from local_agent.cli.commands import cmd_models
+
+            return cmd_models(ui, prompter, load_settings(overrides_from_args(args), lenient=True), args.task)
+        if sub == "config":
+            from local_agent.cli.commands import cmd_config
+
+            try:
+                current: Optional[Settings] = load_settings(overrides_from_args(args))
+            except ConfigError:
+                current = None
+            return cmd_config(ui, prompter, current, args.task)
+
+        settings = _load_or_repair(args, ui, prompter, interactive)
+        if settings is None:
+            return 1
+
+        def run_wizard() -> Optional[Settings]:
+            from local_agent.onboarding.wizard import Wizard
+
+            base = load_settings(overrides_from_args(args), lenient=True)
+            if Wizard(ui, prompter, base).run(first_run=not base.onboarding_completed) is None:
+                return None
+            return load_settings(overrides_from_args(args))
+
+        if not settings.onboarding_completed and not settings.model:
+            if not interactive:
+                raise ConfigError("No model configured.", hint="Run `local-agent setup` once, or pass --model NAME.")
+            settings = run_wizard()
+            if settings is None:
+                return 1
+            ui.print()
+
+        if interactive or args.task:
+            _header(ui, workspace)
+        session = start_session(
+            settings, workspace, ui, prompter,
+            interactive=interactive or (ui.interactive and args.resume),
+            run_setup=run_wizard if interactive else None,
+            show_checks=not args.quiet and (interactive or args.verbose),
+        )
         task = " ".join(args.task).strip()
 
         if args.resume:
@@ -209,39 +180,35 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not sys.stdin.isatty():
                 return 0 if report.status == "completed" else 1
         elif task:
-            ui.print(ui.s.dim(f"Workspace {session.workspace.root} | model {settings.model} | mode {session.engine.mode}"))
+            ui.print(ui.s.dim(f"model {settings.model} | mode {session.engine.mode}"))
             report = session.agent.run_task(task)
             ui.report(report, show_message=not ui.is_tty)
             return 0 if report.status == "completed" else 1
 
-        if ui.is_tty:
-            ui.print(ui.s.cyan(BANNER))
-            ui.print(ui.s.dim(SUBTITLE))
         ui.print()
-        ui.print(f"  Workspace: {session.workspace.root}")
-        ui.print(f"  Model:     {settings.model} ({session.provider.tool_mode} tool calling)")
-        ui.print(f"  Mode:      {session.engine.mode}: {MODE_DESCRIPTIONS[session.engine.mode]}")
-        if session.memory and session.memory.facts():
-            ui.print(f"  Memory:    {len(session.memory.facts())} project fact(s) loaded (/memory to inspect)")
-        ui.print(ui.s.dim("  Type a task, or /help. Ctrl+C cancels a running task."))
-        if session.provider.tool_mode != "native":
-            ui.notice(f"{session.tool_mode_reason}. Prompt-based tool calls are less reliable; a tool-capable model is recommended.", "warning")
+        ui.print(ui.s.bold("Local-Agent-CLI is ready.") + ui.s.dim("  /help for commands, Ctrl+C cancels a running task."))
+        if settings.mode == "full":
+            ui.print(ui.s.red("Full Control: ordinary commands run without asking and are not sandboxed."))
+        ui.print("What would you like to work on?")
 
         def switch(model: str) -> Optional[Session]:
-            new_settings = load_settings(dict(overrides_from_args(args), model=model, mode=session.engine.mode))
+            from local_agent.config import load_settings as _ls
+
+            new_settings = _ls(dict(overrides_from_args(args), model=model, mode=session.engine.mode))
             try:
-                return _make_session(new_settings, workspace, ui)
+                provider, info, why = create_provider(new_settings)
+                return build_session(new_settings, workspace, ui, provider, info, why)
             except AgentError as exc:
                 ui.print(ui.s.red(f"  {exc}"))
                 return None
 
         return Repl(session, ui, switch_model=switch).run()
+    except StartupAborted as exc:
+        ui.print(ui.s.red(str(exc)))
+        return exc.code
     except ProviderUnavailable as exc:
         ui.print(ui.s.red(f"Model unavailable: {exc.message}"))
-        hint = exc.hint or (
-            "Is Ollama running? Start it with `ollama serve`, or check --base-url." if "ollama" in str(exc).lower() or "11434" in str(exc) else "Check the server URL and model name."
-        )
-        ui.print(f"  hint: {hint}")
+        ui.print(f"  hint: {exc.hint or 'Is Ollama running? Start it with `ollama serve`, or run `local-agent doctor`.'}")
         return 2
     except AgentError as exc:
         ui.print(ui.s.red(f"Error: {exc.message}"))
@@ -257,6 +224,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             ui.print(ui.s.red(f"Unexpected error: {sys.exc_info()[1]!r}. Re-run with --verbose for the traceback."))
         return 1
+
+
+def _load_or_repair(args: argparse.Namespace, ui: TerminalUI, prompter: Prompter, interactive: bool) -> Optional[Settings]:
+    """Load settings; on an invalid config offer to repair it via setup (interactive only)."""
+    try:
+        return load_settings(overrides_from_args(args))
+    except ConfigError as exc:
+        if not interactive:
+            raise
+        ui.check(False, "Configuration problem", exc.message)
+        choice = prompter.select("How would you like to continue?", [
+            Option("Repair it with setup", "setup", "the old file is backed up; valid settings are kept"),
+            Option("Quit", "quit"),
+        ])
+        if choice == "quit":
+            return None
+        from local_agent.onboarding.wizard import Wizard
+
+        base = load_settings(overrides_from_args(args), lenient=True)
+        if Wizard(ui, prompter, base).run(first_run=False) is None:
+            return None
+        return load_settings(overrides_from_args(args))
 
 
 if __name__ == "__main__":

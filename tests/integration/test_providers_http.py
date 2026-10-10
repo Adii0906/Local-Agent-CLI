@@ -1,11 +1,9 @@
 """Provider adapters against a local fake HTTP server (no real model, no network)."""
 
-import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List
+from typing import List
 
 import pytest
+from fake_ollama import FakeServer
 
 from local_agent.config import Settings
 from local_agent.errors import ProviderError, ProviderUnavailable
@@ -13,73 +11,6 @@ from local_agent.llm.base import Message
 from local_agent.llm.factory import create_provider
 from local_agent.llm.ollama import OllamaProvider
 from local_agent.llm.openai_compat import OpenAICompatProvider
-
-
-class FakeServer:
-    """Scriptable fake of the Ollama and OpenAI-compatible HTTP APIs."""
-
-    def __init__(self) -> None:
-        self.requests: List[Dict[str, Any]] = []
-        self.chat_replies: List[Any] = []  # list of chunk-lists, or an int HTTP status
-        self.models = ["qwen2.5-coder:7b"]
-        self.capabilities: Any = ["completion", "tools"]
-        server = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *a):  # silence
-                pass
-
-            def _json(self, code, obj):
-                body = json.dumps(obj).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def do_GET(self):
-                server.requests.append({"path": self.path, "headers": dict(self.headers)})
-                if self.path == "/api/tags":
-                    self._json(200, {"models": [{"name": m} for m in server.models]})
-                elif self.path == "/v1/models":
-                    self._json(200, {"data": [{"id": m} for m in server.models]})
-                else:
-                    self._json(404, {"error": "not found"})
-
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                server.requests.append({"path": self.path, "body": payload, "headers": dict(self.headers)})
-                if self.path == "/api/show":
-                    if payload.get("model") not in server.models:
-                        self._json(404, {"error": f"model '{payload.get('model')}' not found"})
-                        return
-                    info = {"model_info": {"qwen2.context_length": 32768}, "details": {"family": "qwen2", "parameter_size": "7.6B"}}
-                    if server.capabilities is not None:
-                        info["capabilities"] = server.capabilities
-                    self._json(200, info)
-                    return
-                reply = server.chat_replies.pop(0) if server.chat_replies else []
-                if isinstance(reply, int):
-                    self._json(reply, {"error": "server says no"})
-                    return
-                self.send_response(200)
-                sse = self.path.endswith("/chat/completions")
-                self.send_header("Content-Type", "text/event-stream" if sse else "application/x-ndjson")
-                self.end_headers()
-                for chunk in reply:
-                    line = (f"data: {json.dumps(chunk)}\n\n" if sse else json.dumps(chunk) + "\n").encode()
-                    self.wfile.write(line)
-                    self.wfile.flush()
-                if sse:
-                    self.wfile.write(b"data: [DONE]\n\n")
-
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-
-    def close(self):
-        self.httpd.shutdown()
 
 
 @pytest.fixture
@@ -206,4 +137,4 @@ def test_cli_reports_unreachable_model_cleanly(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("LOCAL_AGENT_CONFIG", str(tmp_path / "cfg.json"))
     rc = main(["--model", "m", "--base-url", "http://127.0.0.1:9", "-C", str(tmp_path), "hello"])
     out = capsys.readouterr().out
-    assert rc == 2 and "Model unavailable" in out and "Traceback" not in out
+    assert rc == 2 and "Ollama not reachable" in out and "Cannot reach Ollama" in out and "Traceback" not in out

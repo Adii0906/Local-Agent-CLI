@@ -56,23 +56,57 @@ pip install -e ".[dev]"     # optional: pytest, for running the test suite
 
 Optional: install [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for fast code search. Without it, a Python fallback is used.
 
-## Set up a model
+## First run
+
+Install [Ollama](https://ollama.com/download), then just run:
 
 ```bash
-ollama serve                       # if not already running
-ollama pull qwen2.5-coder:7b       # recommended: coding model with native tool calling
-local-agent --setup                # choose provider, model and default permission mode
-local-agent --doctor               # verify server, model, context size, tool-calling support
+local-agent
 ```
 
-The agent works best with a model that supports **native tool calling** (`qwen2.5-coder`, `qwen3`, `llama3.1`, `mistral`). For models without it, the agent switches to prompt-based tool calls, which is less reliable. `--doctor` and `/status` show which mode is active and why.
+The first launch opens a short setup:
+
+1. **Check your environment.** Checks whether Ollama is installed and whether its service is actually responding. These are separate checks, so an installed-but-stopped Ollama is reported as not running. It also lists the models you have, and checks git, ripgrep and the data directory. If Ollama is missing or stopped, setup shows the install or start command for your OS and offers *Retry*, *Start Ollama for me*, a different URL, or an OpenAI-compatible server.
+2. **Choose your model.** Lists the models actually installed in Ollama, with size, *coding/general* and *tools* (native tool calling), and recommends one for your RAM. You can also enter any model name. Nothing is downloaded without your confirmation; downloads show real progress, and Ctrl+C cancels them (Ollama resumes partial downloads). The chosen model is then **tested with a real request**. If it can't do tool calling, setup explains the limitation and lets you pick another model.
+3. **Configure permissions.** Choose Plan, Ask Before Changes (recommended), Auto Edit, or Full Control (requires typing `yes`). The permission engine enforces this on every action.
+4. **Start coding.** Setup shows a summary, saves the config, and starts the agent.
+
+Later launches skip setup. They print a short checklist, where each ✓ appears only after that step really succeeded, then go straight to the prompt:
+
+```
+>_ Local-Agent-CLI v2.1.0  ~/code/my-project
+  ✓ Configuration loaded: ~/.config/local-agent/config.json
+  ✓ Ollama connected: v0.6.2 at http://localhost:11434
+  ✓ Model: qwen2.5-coder:7b (native tool calling)
+  ✓ Permission mode: Ask Before Changes (ask)
+  ✓ Project detected: my-project (Python, TypeScript)
+  ✓ Memory initialized: 3 project fact(s), 5 past task(s)
+
+Local-Agent-CLI is ready.
+What would you like to work on?
+```
+
+If Ollama stops or the configured model disappears, you get a recovery menu instead of a crash: retry, start Ollama, switch to another installed model, download it, or rerun setup.
+
+### Managing models and settings
+
+```bash
+local-agent setup                   # rerun the setup (current values pre-selected; nothing saved until you confirm)
+local-agent models                  # installed models: size, parameters, coding/tools, recommended
+local-agent models use qwen3:8b     # test the model with a real request, then make it the default
+local-agent models pull qwen2.5-coder:7b   # download with progress
+local-agent config                  # config file path, schema and effective settings
+local-agent config set mode auto    # change one setting (validated; Full Control asks for confirmation)
+local-agent doctor [--test]         # diagnose Ollama, config and model (--test sends a real request)
+```
+
+Coding models with **native tool calling** work best (`qwen2.5-coder`, `qwen3`, `llama3.1`, `mistral`). Without native tool calling, the agent falls back to prompt-based tool calls. Those are less reliable, and small models then tend to reply with code instead of editing files.
 
 | Model | Size | Notes |
 |---|---|---|
-| `qwen2.5-coder:7b` | 4.7 GB | Recommended default |
-| `qwen2.5-coder:3b` | 2.0 GB | Modest hardware; simpler tasks |
+| `qwen2.5-coder:7b` | 4.7 GB | Recommended with 16 GB+ RAM |
+| `qwen2.5-coder:3b` | 1.9 GB | 8 GB RAM; simpler tasks |
 | `qwen3:8b`, `llama3.1:8b` | ~5 GB | Good tool calling, general reasoning |
-| `deepseek-coder-v2:16b` | 9 GB | Better code, needs more RAM |
 | `codellama:7b` | 3.8 GB | No native tools (prompt-based only) |
 
 Small local models make mistakes. Review diffs before approving them, and prefer `ask` mode until you trust a model on your codebase.
@@ -154,7 +188,7 @@ Relevant memory is injected into the prompt as clearly labelled *reference data*
 
 ## Configuration
 
-`~/.config/local-agent/config.json` (or `$LOCAL_AGENT_CONFIG`; `%APPDATA%\local-agent\config.json` on Windows). Precedence: defaults < config file < environment (`LOCAL_AGENT_MODEL`, `LOCAL_AGENT_PROVIDER`, `LOCAL_AGENT_BASE_URL`, `LOCAL_AGENT_MODE`, `OLLAMA_HOST`) < CLI flags.
+`~/.config/local-agent/config.json` on Linux, `~/Library/Application Support/local-agent/config.json` on macOS, `%APPDATA%\local-agent\config.json` on Windows, or `$LOCAL_AGENT_CONFIG`. The file carries a `schema_version`. Older files are migrated automatically and saved in the new format on the next change. A file from a newer version is never overwritten. An unreadable file is backed up as `config.json.bak-<time>` before setup writes a new one. Setup and `config set` change only the keys they set and keep everything else. Project memory lives separately, under the data directory. Precedence: defaults < config file < environment (`LOCAL_AGENT_MODEL`, `LOCAL_AGENT_PROVIDER`, `LOCAL_AGENT_BASE_URL`, `LOCAL_AGENT_MODE`, `OLLAMA_HOST`) < CLI flags.
 
 ```json
 {
@@ -193,7 +227,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module layout and the a
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest            # 180 tests: unit, integration, security
+python -m pytest            # 227 tests: unit, integration, security, onboarding
 ```
 
 The tests never call a real or paid model. They use a scripted fake model, plus a local fake Ollama/OpenAI HTTP server for the adapters and a full CLI run. Shell tests only run the current Python interpreter with harmless snippets.
@@ -207,6 +241,7 @@ The tests never call a real or paid model. They use a scripted fake model, plus 
 | Command execution: timeouts, Ctrl+C, output limits, env scrubbing | Working on Linux; macOS/Windows code paths written but **not tested** yet |
 | Permission engine, risk classifier, sensitive-file and workspace protection | Working; heuristic for shell commands (see SECURITY.md) |
 | Persistent memory, task history, resume, checkpoints / undo | Working |
+| First-run setup, `models` / `config` / `doctor` commands, startup recovery | Working against a fake Ollama; arrow-key menus verified in a Linux terminal. Windows/macOS key handling written but **not yet tested** |
 | Ollama adapter | Tested against a protocol-faithful fake server, **not yet against a live Ollama** |
 | OpenAI-compatible adapter | Tested against a fake server only |
 | Context management (elision, summarization, read de-duplication) | Working; token counts are estimates unless the server reports usage |
@@ -214,7 +249,9 @@ The tests never call a real or paid model. They use a scripted fake model, plus 
 
 ## Troubleshooting
 
-- **"Model unavailable: Cannot reach Ollama"**: start it with `ollama serve`, or point `--base-url` / `OLLAMA_HOST` at it.
+- **Start with `local-agent doctor`.** It checks the config, whether Ollama is installed *and* running, the installed models, the configured model and its tool support (`--test` sends a real request).
+- **"Ollama not reachable"**: start it with `ollama serve` (or open the Ollama app), or point `--base-url` / `OLLAMA_HOST` at it. In an interactive session you can choose *Start Ollama for me*.
+- **The agent shows code instead of creating files**: the model is not calling tools. The agent asks the model once to apply the change with its file tools. If it keeps happening, switch to a tool-capable coding model (`local-agent models`, look for `tools`).
 - **"Model 'x' is not installed"**: `ollama pull x`, or choose one from `/model`.
 - **The agent writes JSON instead of acting, or loops**: the model's tool calling is weak. Use a tool-capable model (`--doctor` shows support), or set `--tool-mode prompted`/`native` explicitly.
 - **Answers get cut off or the model forgets early context**: Ollama defaults to a small context. The agent requests up to 32k (`num_ctx`), capped by the model. Set `context_window` if you have more RAM, or use `/compact`.
