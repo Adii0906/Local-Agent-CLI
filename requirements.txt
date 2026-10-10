@@ -1,1 +1,3 @@
-flask==3.0.0
+# Local Agent has no required runtime dependencies (Python standard library only).
+# Development / tests:
+pytest>=7
