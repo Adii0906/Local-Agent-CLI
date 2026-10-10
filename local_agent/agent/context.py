@@ -24,7 +24,9 @@ Permission mode: {mode} ({mode_desc})
 How to work:
 1. Gather only the context you need: project_info, search_code / find_files, then read_file on the relevant parts.
 2. For multi-step tasks, call update_plan with concrete steps first, and keep their status current.
-3. Read a file before editing it. Prefer edit_file for targeted changes; use write_file for new files.
+3. You have direct access to the project files. When the task needs new or changed code, APPLY it yourself:
+   write_file creates files, edit_file changes existing ones (read the file first). Never paste code and ask the
+   user to create, copy or save a file; never say a file was created unless write_file succeeded.
 4. After changing code, verify: run the relevant tests, linter or build with run_command when one exists.
 5. If a command fails, read the error, find the cause, fix it, and re-run. Do not loop on the same failing action.
 6. If the user denies an action, do not retry it. Adapt, or explain what the user would need to do.

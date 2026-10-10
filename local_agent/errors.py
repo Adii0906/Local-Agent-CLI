@@ -37,6 +37,14 @@ class ProviderUnavailable(ProviderError):
     """The backend cannot be reached or the model is not installed."""
 
 
+class ModelNotFound(ProviderUnavailable):
+    """The server is reachable but does not have the requested model."""
+
+    def __init__(self, model: str, message: str = "", hint: str = "") -> None:
+        super().__init__(message or f"Model '{model}' is not installed.", hint)
+        self.model = model
+
+
 class ToolError(AgentError):
     """A tool could not complete. The message is returned to the model."""
 

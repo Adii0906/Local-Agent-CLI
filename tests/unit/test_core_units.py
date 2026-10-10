@@ -220,8 +220,9 @@ class TestConfig:
         assert (s.model, s.mode, s.max_iterations) == ("from-env", "plan", 5)
         with pytest.raises(ConfigError):
             load_settings({"mode": "yolo"}, config_path=cfg)
+        assert "Unknown setting 'unknown'" in apply_overrides(Settings(), {"unknown": 1}, "a file")[0]  # file: warn, keep going
         with pytest.raises(ConfigError):
-            apply_overrides(Settings(), {"unknown": 1}, "test")
+            apply_overrides(Settings(), {"unknown": 1}, "command line")
         with pytest.raises(ConfigError):
             apply_overrides(Settings(), {"max_iterations": "many"}, "test")
 
@@ -229,7 +230,7 @@ class TestConfig:
         cfg = tmp_path / "sub" / "c.json"
         save_user_config({"model": "m1"}, cfg)
         save_user_config({"mode": "auto"}, cfg)
-        assert json.loads(cfg.read_text()) == {"model": "m1", "mode": "auto"}
+        assert json.loads(cfg.read_text()) == {"schema_version": 2, "model": "m1", "mode": "auto"}
 
     def test_public_dict_has_no_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value-123456789012345")
