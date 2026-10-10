@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,6 +27,9 @@ from local_agent.security.secrets import is_secret_env_name, redact
 from local_agent.tools.base import Assessment, Tool, ToolContext, ToolResult
 
 _IS_WINDOWS = sys.platform == "win32"
+_CMD_BUILTINS = {"assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", "dir", "echo", "erase",
+                 "exit", "ftype", "md", "mkdir", "mklink", "move", "path", "pause", "popd", "prompt", "pushd", "rd",
+                 "ren", "rename", "rmdir", "set", "setlocal", "start", "time", "title", "type", "ver", "verify", "vol"}
 
 
 class _CappedBuffer:
@@ -132,6 +136,15 @@ def execute(
         "stderr": subprocess.PIPE,
     }
     if _IS_WINDOWS:
+        if not use_shell:
+            # cmd.exe reports a missing program as exit 1 ("not recognized"); report it like POSIX shells do.
+            try:
+                parts = shlex.split(command, posix=False)
+            except ValueError:
+                parts = []
+            prog = parts[0].strip('"') if parts else ""
+            if prog and prog.lower() not in _CMD_BUILTINS and not shutil.which(prog):
+                return {"exit_code": 127, "stdout": "", "stderr": f"command not found: {prog}", "duration": 0.0, "timed_out": False, "cancelled": False}
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         argv: Any = command
         kwargs["shell"] = True
