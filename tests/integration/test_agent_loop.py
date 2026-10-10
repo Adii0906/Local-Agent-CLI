@@ -243,3 +243,40 @@ def test_compaction_triggers_on_small_context(make_session, workspace):
     report = session.agent.run_task("read big.py")
     assert report.status == "completed"
     assert any("Context compacted" in e[2] for e in ui.events if e[0] == "notice")
+
+
+CODE_REPLY = "Here is the calculator. Save it as calc.py:\n```python\ndef add(a, b):\n    return a + b\n\nprint(add(1, 2))\n```"
+
+
+def test_model_pasting_code_is_told_to_apply_it(make_session, workspace):
+    steps = [
+        ChatResponse(CODE_REPLY),
+        respond(call("write_file", "c1", path="calc.py", content="def add(a, b):\n    return a + b\n")),
+        ChatResponse("Created calc.py with add()."),
+    ]
+    session, provider, ui = make_session(steps, mode="auto")
+    report = session.agent.run_task("create a calculator")
+    assert (workspace / "calc.py").exists()
+    assert report.files == [{"path": "calc.py", "change": "created"}]
+    assert any("instead of changing files" in e[2] for e in ui.events if e[0] == "notice")
+    assert any(m.role == "user" and "did not create or change any files" in m.content for m in provider.seen[1])
+
+
+def test_code_nudge_only_once_and_not_for_explanations_or_plan_mode(make_session):
+    session, provider, ui = make_session([ChatResponse(CODE_REPLY), ChatResponse(CODE_REPLY)], mode="auto")
+    report = session.agent.run_task("make a calculator")
+    assert report.status == "completed" and report.iterations == 2  # nudged once, then accepted
+    assert "UNVERIFIED" not in " ".join(report.verification())
+
+    explanation = "The function works like this:\n```python\na = 1\nb = 2\nprint(a + b)\n```\nIt prints 3."
+    session, provider, ui = make_session([ChatResponse(explanation)], mode="auto")
+    assert session.agent.run_task("how does it work?").iterations == 1
+
+    session, provider, ui = make_session([ChatResponse(CODE_REPLY)], mode="plan")
+    assert session.agent.run_task("plan a calculator").iterations == 1
+
+
+def test_system_prompt_forbids_asking_user_to_save_files(make_session):
+    session, provider, ui = make_session([ChatResponse("ok")])
+    session.agent.run_task("x")
+    assert "Never paste code and ask the" in provider.seen[0][0].content

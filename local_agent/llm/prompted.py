@@ -33,7 +33,8 @@ You can call tools. To call one, reply with a fenced block exactly like this (on
 ```
 
 After the block, STOP and wait: the result will come back in the next message, starting with "TOOL RESULT".
-Never invent tool results. When the task is complete, reply with plain text and no tool block.
+Never invent tool results. To create or change files you MUST call write_file or edit_file; never paste code
+for the user to save. When the task is complete, reply with plain text and no tool block.
 
 Available tools (JSON Schema for arguments):
 {tools}

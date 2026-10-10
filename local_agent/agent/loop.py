@@ -8,6 +8,7 @@ stop records a concrete reason in the TaskReport.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 import traceback
@@ -33,6 +34,34 @@ REPEAT_LIMIT = 3
 FAILURE_HINT_AT = 5
 FAILURE_STOP_AT = 10
 STATE_CHANGING = {Risk.CREATE, Risk.EDIT, Risk.WRITE_SENSITIVE, Risk.DESTRUCTIVE, Risk.SHELL, Risk.NETWORK, Risk.PRIVILEGED}
+
+
+MAX_CODE_NUDGES = 1
+CODE_NUDGE = (
+    "You wrote code in your reply but did not create or change any files. You have tools for this: use write_file "
+    "to create new files and edit_file to change existing ones (read them first), then verify the result. Do not "
+    "ask the user to copy or save code. If the user only asked a question and did not want files changed, reply "
+    "with your final answer again and say so."
+)
+_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+_SAVE_HINT = re.compile(
+    r"\b(save (it|this|that|the (code|file|following))|save (it )?as|create (a|the|this|these|new) (new )?files?|"
+    r"(file|files) (named|called)|in a (new )?file|copy (this|the) code|paste (this|it)|put (this|the following) (in|into)|"
+    r"add (this|the following) to|following (content|code) (in|to|into)|filename|file name)\b",
+    re.I,
+)
+_PATH_HEADER = re.compile(
+    r"(^|\n)\s*(#+\s*|\*\*|`|File:\s*|\d+\.\s*)?[\w./\\-]+\.(py|js|jsx|ts|tsx|html|css|scss|json|md|go|rs|java|kt|rb|php|c|cc|cpp|h|cs|sh|ya?ml|toml|txt|sql|vue|svelte)\b",
+    re.I,
+)
+
+
+def looks_like_unapplied_code(text: str) -> bool:
+    """A reply that hands the user code to save instead of applying it with tools."""
+    blocks = [b for b in _FENCE.findall(text) if b.strip().count("\n") >= 2]
+    if not blocks:
+        return False
+    return bool(_SAVE_HINT.search(text) or _PATH_HEADER.search(text))
 
 
 def new_session_id() -> str:
@@ -201,6 +230,8 @@ class Agent:
         failures = 0
         empty_replies = 0
         known = set(self.registry.names())
+        nudges = 0
+        changes_at_start = self.file_changes
         self._save_session("running", "")
         try:
             while True:
@@ -232,6 +263,17 @@ class Agent:
                         if empty_replies >= 2:
                             raise _Stop("stopped", "the model returned empty responses")
                         self.messages.append(Message("user", "Your last reply was empty. Continue the task with tools, or give your final summary."))
+                        continue
+                    if (
+                        nudges < MAX_CODE_NUDGES
+                        and self.engine.mode != "plan"
+                        and self.file_changes == changes_at_start
+                        and not report.denied
+                        and looks_like_unapplied_code(text)
+                    ):
+                        nudges += 1
+                        self.ui.notice("The model replied with code instead of changing files; asking it to apply the changes with its tools.", "info")
+                        self.messages.append(Message("user", CODE_NUDGE))
                         continue
                     report.final_message = text
                     break
